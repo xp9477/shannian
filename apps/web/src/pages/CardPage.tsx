@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ExternalLink,
+  Film,
   MoreHorizontal,
   Pencil,
   RefreshCw,
@@ -428,16 +429,90 @@ export default function CardPage() {
                 )}
               </div>
 
-              <div className="hidden h-28 w-28 shrink-0 overflow-hidden rounded-2xl bg-[var(--color-muted)] ring-1 ring-black/[0.04] sm:block dark:ring-white/[0.06]">
-                {card.thumbnailUrl ? (
-                  <img src={card.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center text-[var(--color-muted-foreground)] opacity-50">
-                    {card.url ? "↗" : "·"}
+              {/* Small cover when no multi-media gallery */}
+              {(!card.media || card.media.length === 0) && (
+                <div className="hidden h-28 w-28 shrink-0 overflow-hidden rounded-2xl bg-[var(--color-muted)] ring-1 ring-black/[0.04] sm:block dark:ring-white/[0.06]">
+                  {card.thumbnailUrl ? (
+                    <img src={card.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-[var(--color-muted-foreground)] opacity-50">
+                      {card.url ? "↗" : "·"}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* P1: multi image / video gallery */}
+            {card.media && card.media.length > 0 && (
+              <section
+                className="surface-card overflow-hidden rounded-2xl"
+                aria-label={`媒体 ${card.media.length} 项`}
+              >
+                <div
+                  className={cn(
+                    "grid gap-0.5 bg-[var(--color-border)]",
+                    card.media.length === 1 && "grid-cols-1",
+                    card.media.length === 2 && "grid-cols-2",
+                    card.media.length >= 3 && "grid-cols-2 sm:grid-cols-2"
+                  )}
+                >
+                  {card.media.map((m, i) => (
+                    <div
+                      key={`${m.url}-${i}`}
+                      className={cn(
+                        "relative bg-[var(--color-muted)]",
+                        card.media.length === 1 && "aspect-[16/10] max-h-[28rem]",
+                        card.media.length === 2 && "aspect-square sm:aspect-[4/3]",
+                        card.media.length === 3 && i === 0 && "col-span-2 aspect-[16/9]",
+                        card.media.length === 3 && i > 0 && "aspect-square",
+                        card.media.length >= 4 && "aspect-square",
+                        card.media.length > 4 && i >= 4 && "hidden"
+                      )}
+                    >
+                      {m.type === "image" ? (
+                        <a href={m.url} target="_blank" rel="noreferrer" className="block h-full w-full">
+                          <img
+                            src={m.url}
+                            alt=""
+                            className="h-full w-full object-cover"
+                            loading={i === 0 ? "eager" : "lazy"}
+                            referrerPolicy="no-referrer"
+                          />
+                        </a>
+                      ) : (
+                        <div className="relative h-full w-full">
+                          <video
+                            className="h-full w-full object-cover"
+                            controls
+                            playsInline
+                            preload="metadata"
+                            poster={m.posterUrl || undefined}
+                            src={m.url}
+                          />
+                          {m.type === "gif" && (
+                            <span className="pointer-events-none absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                              GIF
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {card.media.length > 4 && i === 3 && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-lg font-semibold text-white">
+                          +{card.media.length - 4}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {card.media.some((m) => m.type === "video" || m.type === "gif") && (
+                  <div className="flex items-center gap-1.5 border-t border-[var(--color-border)]/70 px-3 py-2 text-[11px] text-[var(--color-muted-foreground)]">
+                    <Film className="size-3.5" aria-hidden />
+                    含视频/动图 · 可直接播放
                   </div>
                 )}
-              </div>
-            </div>
+              </section>
+            )}
 
             <section className="surface-card rounded-2xl p-6 sm:p-7">
               <div className="mb-3 flex flex-wrap items-center gap-2">

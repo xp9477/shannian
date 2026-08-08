@@ -2,38 +2,38 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* 闪念 × Cubox-inspired reading library tokens */
+/* 闪念 × 暖纸 · Cubox 分流台 · U2 */
 @theme {
   --font-sans: "Inter", "SF Pro Text", "PingFang SC", "Noto Sans SC", "Microsoft YaHei",
     ui-sans-serif, system-ui, sans-serif;
 
-  /* Paper-like surfaces (Cubox reading room) */
-  --color-background: #f4f5f7;
+  /* Warm paper surfaces */
+  --color-background: #f6f5f2;
   --color-foreground: #1a1d26;
-  --color-card: #ffffff;
+  --color-card: #fffefc;
   --color-card-foreground: #1a1d26;
-  --color-popover: #ffffff;
+  --color-popover: #fffefc;
   --color-popover-foreground: #1a1d26;
-  /* Soft indigo-blue — refined, not neon */
   --color-primary: #4c6ef5;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #eef0f4;
+  --color-secondary: #eeece7;
   --color-secondary-foreground: #1a1d26;
-  --color-muted: #eef0f4;
-  --color-muted-foreground: #6b7280;
+  --color-muted: #eeece7;
+  /* Slightly darker for WCAG-ish secondary text on paper */
+  --color-muted-foreground: #5c6370;
   --color-accent: #eef2ff;
   --color-accent-foreground: #364fc7;
   --color-destructive: #e03131;
   --color-destructive-foreground: #ffffff;
-  --color-border: #e6e8ee;
-  --color-input: #e6e8ee;
+  --color-border: #e5e2db;
+  --color-input: #e5e2db;
   --color-ring: #748ffc;
-  --color-sidebar: #fafbfc;
-  --color-sidebar-border: #eef0f4;
+  --color-sidebar: #faf9f6;
+  --color-sidebar-border: #eeece7;
   --radius-sm: 0.5rem;
   --radius-md: 0.625rem;
   --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
+  --radius-xl: 0.875rem;
 }
 
 .dark {
@@ -55,7 +55,7 @@
   --color-destructive-foreground: #0c0d10;
   --color-border: #23262f;
   --color-input: #23262f;
-  --color-ring: #748ffc;
+  --color-ring: #818cf8;
   --color-sidebar: #0e1014;
   --color-sidebar-border: #1a1d24;
 }
@@ -84,29 +84,25 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* Cubox-like soft elevation */
+/* Paper card — hairline border, almost no shadow */
 .surface-card {
   background: var(--color-card);
-  border: 1px solid color-mix(in oklab, var(--color-border) 88%, transparent);
-  box-shadow:
-    0 1px 2px color-mix(in oklab, #0f1117 4%, transparent),
-    0 0 0 0.5px color-mix(in oklab, var(--color-border) 50%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-border) 92%, transparent);
+  box-shadow: 0 1px 0 color-mix(in oklab, #0f1117 3%, transparent);
 }
 
 .dark .surface-card {
-  box-shadow: 0 1px 0 color-mix(in oklab, #fff 3%, transparent);
+  box-shadow: none;
 }
 
 .surface-elevated {
   background: var(--color-card);
   border: 1px solid var(--color-border);
-  box-shadow:
-    0 4px 16px color-mix(in oklab, #0f1117 6%, transparent),
-    0 1px 2px color-mix(in oklab, #0f1117 4%, transparent);
+  box-shadow: 0 2px 12px color-mix(in oklab, #0f1117 5%, transparent);
 }
 
 .dark .surface-elevated {
-  box-shadow: 0 8px 24px color-mix(in oklab, #000 40%, transparent);
+  box-shadow: 0 4px 16px color-mix(in oklab, #000 35%, transparent);
 }
 
 button,
@@ -124,7 +120,6 @@ textarea:disabled {
   cursor: not-allowed;
 }
 
-/* Quiet scrollbar — Cubox hides chrome */
 .scroll-thin::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -137,10 +132,10 @@ textarea:disabled {
   background: color-mix(in oklab, var(--color-muted-foreground) 38%, transparent);
 }
 
-/* Active nav — soft pill, not harsh bar only */
+/* Active nav — soft pill + 2px indigo rail */
 .nav-active {
   position: relative;
-  background: color-mix(in oklab, var(--color-primary) 9%, var(--color-card));
+  background: color-mix(in oklab, var(--color-primary) 8%, var(--color-card));
   color: var(--color-accent-foreground);
   font-weight: 550;
 }
@@ -148,14 +143,14 @@ textarea:disabled {
   content: "";
   position: absolute;
   left: 0;
-  top: 8px;
-  bottom: 8px;
+  top: 7px;
+  bottom: 7px;
   width: 2.5px;
   border-radius: 999px;
   background: var(--color-primary);
 }
 
-/* Capture hairline — command-line feel, not a heavy card */
+/* Capture hairline */
 .capture-bar {
   background: transparent;
   border: none;
@@ -164,15 +159,15 @@ textarea:disabled {
   box-shadow: none;
 }
 .capture-bar:focus-within {
-  border-bottom-color: color-mix(in oklab, var(--color-primary) 55%, var(--color-border));
+  border-bottom-color: color-mix(in oklab, var(--color-primary) 50%, var(--color-border));
   box-shadow: none;
 }
 
-/* Feed list container — do NOT set overflow:hidden (kills list scroll) */
+/* Feed list panel — paper sheet */
 .feed-panel {
   background: var(--color-card);
-  border: 1px solid color-mix(in oklab, var(--color-border) 90%, transparent);
-  box-shadow: 0 1px 2px color-mix(in oklab, #0f1117 3.5%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-border) 95%, transparent);
+  box-shadow: 0 1px 0 color-mix(in oklab, #0f1117 2.5%, transparent);
   border-radius: var(--radius-xl);
 }
 
@@ -180,18 +175,25 @@ textarea:disabled {
   box-shadow: none;
 }
 
-/* Reading title */
+/* List headline — editorial, scannable */
 .reading-title {
   font-weight: 600;
-  letter-spacing: -0.02em;
-  line-height: 1.35;
+  letter-spacing: -0.022em;
+  line-height: 1.4;
 }
 
-/* Snippet / AI summary — Cubox excerpt feel */
 .reading-snippet {
   color: var(--color-muted-foreground);
-  line-height: 1.6;
+  line-height: 1.65;
   letter-spacing: -0.005em;
+}
+
+/* Page title rhythm */
+.page-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.3;
 }
 
 @media (prefers-reduced-motion: reduce) {

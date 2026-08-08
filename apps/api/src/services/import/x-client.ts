@@ -4,6 +4,7 @@
  * Outbound requests use project HTTP proxy when configured.
  */
 
+import type { CardMediaItem } from "@shannian/shared";
 import { outboundFetch } from "../../lib/http.js";
 
 export interface XCredentials {
@@ -17,6 +18,7 @@ export interface XBookmarkItem {
   text: string | null;
   authorName: string | null;
   authorScreenName: string | null;
+  media: CardMediaItem[];
   raw: unknown;
 }
 
@@ -274,7 +276,8 @@ function extractTweetsFromTimeline(json: unknown): XBookmarkItem[] {
         const { screen, name } = extractUserFromTweetResult(tweetResult);
         const text =
           (legacy.full_text as string) || (legacy.text as string) || null;
-        const thumbnailUrl = extractThumbnailFromLegacy(legacy);
+        const media = extractMediaFromLegacy(legacy);
+        const thumbnailUrl = mediaThumb(media);
         items.push({
           tweetId: restId,
           url: screen
@@ -283,7 +286,8 @@ function extractTweetsFromTimeline(json: unknown): XBookmarkItem[] {
           text,
           authorName: name,
           authorScreenName: screen,
-          raw: { id: restId, text, user: screen, thumbnailUrl },
+          media,
+          raw: { id: restId, text, user: screen, thumbnailUrl, mediaCount: media.length },
         });
       }
     }
@@ -529,22 +533,59 @@ function extractUserFromTweetResult(tweetResult: Record<string, unknown>): {
   return found;
 }
 
-function extractThumbnailFromLegacy(legacy: Record<string, unknown>): string | null {
-  const media = (
-    legacy.extended_entities as
-      | { media?: { media_url_https?: string; media_url?: string }[] }
-      | undefined
-  )?.media;
-  if (media?.[0]) {
-    return media[0].media_url_https || media[0].media_url || null;
+type XMediaRaw = {
+  type?: string;
+  media_url_https?: string;
+  media_url?: string;
+  original_info?: { width?: number; height?: number };
+  video_info?: {
+    variants?: { content_type?: string; url?: string; bitrate?: number }[];
+  };
+};
+
+/** Extract all photos / videos / gifs from tweet legacy payload. */
+export function extractMediaFromLegacy(legacy: Record<string, unknown>): CardMediaItem[] {
+  const rawList =
+    (
+      legacy.extended_entities as { media?: XMediaRaw[] } | undefined
+    )?.media ||
+    (legacy.entities as { media?: XMediaRaw[] } | undefined)?.media ||
+    [];
+  const out: CardMediaItem[] = [];
+  for (const m of rawList) {
+    const poster = m.media_url_https || m.media_url || null;
+    const w = m.original_info?.width ?? null;
+    const h = m.original_info?.height ?? null;
+    const t = (m.type || "photo").toLowerCase();
+    if (t === "photo") {
+      if (!poster) continue;
+      out.push({ type: "image", url: poster, posterUrl: null, width: w, height: h });
+      continue;
+    }
+    if (t === "video" || t === "animated_gif") {
+      const variants = (m.video_info?.variants || []).filter(
+        (v) => v.content_type === "video/mp4" && v.url
+      );
+      variants.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      const playUrl = variants[0]?.url || poster;
+      if (!playUrl) continue;
+      out.push({
+        type: t === "animated_gif" ? "gif" : "video",
+        url: playUrl,
+        posterUrl: poster,
+        width: w,
+        height: h,
+      });
+    }
   }
-  const entitiesMedia = (
-    legacy.entities as { media?: { media_url_https?: string; media_url?: string }[] } | undefined
-  )?.media;
-  if (entitiesMedia?.[0]) {
-    return entitiesMedia[0].media_url_https || entitiesMedia[0].media_url || null;
-  }
-  return null;
+  return out;
+}
+
+export function mediaThumb(media: CardMediaItem[]): string | null {
+  if (!media.length) return null;
+  const first = media[0];
+  if (first.type === "image") return first.url;
+  return first.posterUrl || first.url;
 }
 
 function parseTweetResult(tweetResult: Record<string, unknown>): XBookmarkItem | null {
@@ -561,7 +602,8 @@ function parseTweetResult(tweetResult: Record<string, unknown>): XBookmarkItem |
 
   const { screen, name } = extractUserFromTweetResult(tweetResult);
   const text = (legacy.full_text as string) || (legacy.text as string) || null;
-  const thumbnailUrl = extractThumbnailFromLegacy(legacy);
+  const media = extractMediaFromLegacy(legacy);
+  const thumbnailUrl = mediaThumb(media);
 
   return {
     tweetId: restId,
@@ -571,7 +613,8 @@ function parseTweetResult(tweetResult: Record<string, unknown>): XBookmarkItem |
     text,
     authorName: name,
     authorScreenName: screen,
-    raw: { id: restId, text, user: screen, thumbnailUrl },
+    media,
+    raw: { id: restId, text, user: screen, thumbnailUrl, mediaCount: media.length },
   };
 }
 
@@ -622,7 +665,5 @@ export async function fetchTweetById(
   }
   const item = parseTweetResult(result);
   if (!item) throw new Error("TWEET_PARSE_FAILED");
-  const thumb =
-    (item.raw as { thumbnailUrl?: string | null } | undefined)?.thumbnailUrl ?? null;
-  return { ...item, thumbnailUrl: thumb };
+  return { ...item, thumbnailUrl: mediaThumb(item.media) };
 }

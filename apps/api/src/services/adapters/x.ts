@@ -37,6 +37,7 @@ export const xAdapter: PlatformAdapter = {
         const text = item.text?.trim() || null;
         const author = normalizeXHandle(item.authorScreenName);
         const title = placeholderTitleFromText(text);
+        const media = item.media || [];
         // Tweet body is content, not page meta — avoid duplicating into description
         return {
           platform: "x",
@@ -44,13 +45,15 @@ export const xAdapter: PlatformAdapter = {
           author,
           description: null,
           contentExcerpt: text ? text.slice(0, 6000) : null,
-          thumbnailUrl: item.thumbnailUrl ?? null,
+          thumbnailUrl: item.thumbnailUrl ?? media[0]?.posterUrl ?? media[0]?.url ?? null,
+          media,
           raw: {
             source: "x_graphql",
             tweetId: item.tweetId,
             authorScreenName: item.authorScreenName,
             authorName: item.authorName,
             hasText: Boolean(text),
+            mediaCount: media.length,
           },
         };
       } catch (e) {

@@ -29,6 +29,8 @@ export const cards = sqliteTable(
     title: text("title"),
     author: text("author"),
     thumbnailKey: text("thumbnail_key"),
+    /** JSON array of CardMediaItem */
+    mediaJson: text("media_json"),
     note: text("note"),
     categoryId: text("category_id"),
     status: text("status").notNull().default("inbox"),

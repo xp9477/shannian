@@ -59,11 +59,14 @@ export const webAdapter: PlatformAdapter = {
       const description =
         pickMeta(html, "og:description") || pickMeta(html, "description");
       const contentExcerpt = extractArticleExcerpt(html, url.toString());
+      const image =
+        pickMeta(html, "og:image") || pickMeta(html, "twitter:image");
       return {
         platform: "web",
         title: pickTitle(html) || url.hostname,
         author: pickMeta(html, "author") || pickMeta(html, "og:site_name"),
-        thumbnailUrl: pickMeta(html, "og:image") || pickMeta(html, "twitter:image"),
+        thumbnailUrl: image,
+        media: image ? [{ type: "image" as const, url: image, posterUrl: null }] : null,
         description,
         contentExcerpt,
         raw: {

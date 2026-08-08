@@ -23,6 +23,19 @@ export interface Category {
 /** How a card was claimed from a platform import (null = manual/paste) */
 export type ImportSource = "x_bookmark";
 
+/** Attached media on a card (images / video / gif) */
+export type CardMediaType = "image" | "video" | "gif";
+
+export interface CardMediaItem {
+  type: CardMediaType;
+  /** Image URL, or playable video URL */
+  url: string;
+  /** Poster frame for video/gif */
+  posterUrl?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
 export interface FlashCard {
   id: string;
   url: string | null;
@@ -32,6 +45,8 @@ export interface FlashCard {
   author: string | null;
   thumbnailKey: string | null;
   thumbnailUrl: string | null;
+  /** Multi-image / video attachments (remote URLs; first used for cover) */
+  media: CardMediaItem[];
   note: string | null;
   categoryId: string | null;
   categoryName: string | null;

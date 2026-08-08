@@ -21,11 +21,20 @@ export async function fetchUrlMeta(urlStr: string): Promise<CardMeta> {
   const url = new URL(ensureUrl(urlStr));
   const adapter = adapters.find((a) => a.match(url)) || webAdapter;
   const partial = await adapter.fetchMeta(url);
+  const media = partial.media?.length ? partial.media : null;
+  const thumb =
+    partial.thumbnailUrl ??
+    (media?.[0]
+      ? media[0].type === "image"
+        ? media[0].url
+        : media[0].posterUrl || media[0].url
+      : null);
   return {
     platform: (partial.platform as Platform) || adapter.id,
     title: partial.title ?? null,
     author: partial.author ?? null,
-    thumbnailUrl: partial.thumbnailUrl ?? null,
+    thumbnailUrl: thumb,
+    media,
     description: partial.description ?? null,
     contentExcerpt: partial.contentExcerpt ?? null,
     raw: partial.raw,

@@ -313,9 +313,21 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        <Section title="数据" desc="运维备份见 docs/ops-backup.md">
+        <Section
+          title="数据与备份"
+          desc="元数据可随时导出；完整恢复还需复制 SQLite 与 MinIO（见仓库 docs/ops-backup.md）。"
+        >
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/50 px-3 py-2.5 text-xs leading-relaxed text-[var(--color-muted-foreground)]">
+            <p className="font-medium text-[var(--color-foreground)]">建议定期备份</p>
+            <ol className="mt-1.5 list-decimal space-y-0.5 pl-4">
+              <li>下方导出 JSON（卡片元数据）</li>
+              <li>停服务后复制 data 目录下的 shannian.db</li>
+              <li>如启用 MinIO：备份 thumbs / vault 前缀</li>
+            </ol>
+          </div>
           <Button
             variant="outline"
+            className="min-h-10 w-full sm:w-auto"
             onClick={async () => {
               const data = await api.exportAll();
               const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -327,7 +339,7 @@ export default function SettingsPage() {
               a.download = `shannian-export-${new Date().toISOString().slice(0, 10)}.json`;
               a.click();
               URL.revokeObjectURL(url);
-              toast.success("已导出");
+              toast.success("已导出 JSON");
             }}
           >
             导出全部 JSON

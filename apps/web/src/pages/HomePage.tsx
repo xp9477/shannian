@@ -213,6 +213,18 @@ export default function HomePage() {
     }
   }, [location.state, navigate]);
 
+  // U3: Escape clears multi-select
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && selected.size > 0) {
+        e.preventDefault();
+        setSelected(new Set());
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected.size]);
+
   /** Extra slices beyond current workspace view (for empty-state / clear) */
   const hasExtraFilter = Boolean(filter.categoryId || q || platform || incomplete || aiFailed);
   const filterChipCount = [platform, incomplete, aiFailed].filter(Boolean).length;
@@ -369,11 +381,11 @@ export default function HomePage() {
         onFilterChange={onFilterChange}
       >
         {/* W1: full-width list; single scroll on AppShell main */}
-        <div className="w-full px-4 py-4 sm:px-6 lg:px-8">
+        <div className="w-full px-4 py-5 sm:px-6 lg:px-10">
           {setup && !setup.hasAi && (
             <div
               role="status"
-              className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100"
+              className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200/70 bg-amber-50/80 px-3.5 py-2.5 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100"
             >
               <span className="font-medium">待配置</span>
               <span>AI（分类与摘要）</span>
@@ -387,12 +399,12 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* C1: title only + count */}
-          <div className="mb-3 flex items-baseline justify-between gap-3">
-            <h1 className="text-[17px] font-semibold tracking-tight text-[var(--color-foreground)]">
+          {/* C1 + U2: page title rhythm */}
+          <div className="mb-4 flex items-baseline justify-between gap-3">
+            <h1 className="page-title text-[var(--color-foreground)]">
               {pageTitle}
               {!loading && (
-                <span className="ml-2 text-[13px] font-normal tabular-nums text-[var(--color-muted-foreground)]">
+                <span className="ml-2.5 text-[13px] font-normal tabular-nums tracking-normal text-[var(--color-muted-foreground)]">
                   {pageCount}
                 </span>
               )}
@@ -401,7 +413,7 @@ export default function HomePage() {
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-8 rounded-full text-xs text-[var(--color-muted-foreground)]"
+                className="min-h-9 rounded-full text-xs text-[var(--color-muted-foreground)]"
                 onClick={drawOne}
               >
                 <Dices className="size-3.5" aria-hidden />
@@ -411,14 +423,14 @@ export default function HomePage() {
           </div>
 
           {/* Capture hairline */}
-          <div className="capture-bar mb-4 flex items-center gap-2 py-1.5 transition-[border-color] duration-150">
+          <div className="capture-bar mb-5 flex items-center gap-2 py-2 transition-[border-color] duration-150">
             <label htmlFor="quick-capture" className="sr-only">
               快速添加链接或想法
             </label>
             <Input
               ref={captureRef}
               id="quick-capture"
-              className="h-9 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
+              className="h-10 border-0 bg-transparent px-0 text-[15px] shadow-none placeholder:text-[var(--color-muted-foreground)]/80 focus-visible:ring-0"
               placeholder="粘贴链接或写下想法… Enter 保存"
               value={quickText}
               onChange={(e) => setQuickText(e.target.value)}
@@ -433,7 +445,7 @@ export default function HomePage() {
               <Button
                 size="sm"
                 variant="ghost"
-                className="h-8 shrink-0 rounded-lg text-xs"
+                className="min-h-9 shrink-0 rounded-lg text-xs font-medium"
                 onClick={saveQuick}
                 disabled={saving}
               >
@@ -442,8 +454,8 @@ export default function HomePage() {
             )}
           </div>
 
-          {/* F1: search always · filters collapsed · view toggle */}
-          <div className="mb-2 flex flex-wrap items-center gap-2">
+          {/* F1: search · filters · view */}
+          <div className="mb-3 flex flex-wrap items-center gap-2">
             <div className="relative min-w-[12rem] flex-1">
               <Search
                 className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-[var(--color-muted-foreground)]"
@@ -454,7 +466,7 @@ export default function HomePage() {
               </label>
               <Input
                 id="search"
-                className="h-8 pl-8"
+                className="h-10 min-h-10 pl-9"
                 placeholder="搜索标题、摘要、想法…"
                 value={qInput}
                 onChange={(e) => setQInput(e.target.value)}
@@ -463,7 +475,7 @@ export default function HomePage() {
             <Button
               variant={filtersOpen || filterChipCount > 0 ? "secondary" : "outline"}
               size="sm"
-              className="h-8 rounded-full gap-1.5 text-xs"
+              className="min-h-10 rounded-full gap-1.5 text-xs"
               onClick={() => setFiltersOpen((v) => !v)}
               aria-expanded={filtersOpen}
             >
@@ -488,8 +500,9 @@ export default function HomePage() {
                 <Button
                   variant={view === "list" ? "secondary" : "ghost"}
                   size="icon"
-                  className="size-7"
+                  className="size-10"
                   aria-pressed={view === "list"}
+                  aria-label="列表视图"
                   onClick={() => {
                     setViewMode("list");
                     setViewState("list");
@@ -502,8 +515,9 @@ export default function HomePage() {
                 <Button
                   variant={view === "grid" ? "secondary" : "ghost"}
                   size="icon"
-                  className="size-7"
+                  className="size-10"
                   aria-pressed={view === "grid"}
+                  aria-label="网格视图"
                   onClick={() => {
                     setViewMode("grid");
                     setViewState("grid");
@@ -516,13 +530,17 @@ export default function HomePage() {
           </div>
 
           {filtersOpen && (
-            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-muted)]/40 px-3 py-2.5">
+            <div
+              className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-muted)]/40 px-3 py-2.5"
+              role="region"
+              aria-label="筛选选项"
+            >
               <label htmlFor="platform" className="sr-only">
                 平台
               </label>
               <select
                 id="platform"
-                className="h-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-2 text-xs"
+                className="h-10 min-h-10 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-2 text-xs"
                 value={platform}
                 onChange={(e) => setPlatform(e.target.value)}
               >
@@ -536,7 +554,7 @@ export default function HomePage() {
               <Button
                 variant={incomplete ? "default" : "outline"}
                 size="sm"
-                className="h-8 rounded-full text-xs"
+                className="min-h-9 rounded-full text-xs"
                 onClick={() => setIncomplete(!incomplete)}
                 aria-pressed={incomplete}
               >
@@ -545,7 +563,7 @@ export default function HomePage() {
               <Button
                 variant={aiFailed ? "default" : "outline"}
                 size="sm"
-                className="h-8 rounded-full text-xs"
+                className="min-h-9 rounded-full text-xs"
                 onClick={() => setAiFailed(!aiFailed)}
                 aria-pressed={aiFailed}
               >
@@ -555,7 +573,7 @@ export default function HomePage() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-8 rounded-full text-xs text-[var(--color-muted-foreground)]"
+                  className="min-h-9 rounded-full text-xs text-[var(--color-muted-foreground)]"
                   onClick={() => {
                     setPlatform("");
                     setIncomplete(false);
@@ -570,24 +588,31 @@ export default function HomePage() {
 
           {/* B1: bulk only when selection active */}
           {selectionActive && (
-            <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-[var(--color-primary)]/20 bg-[color-mix(in_oklab,var(--color-primary)_6%,var(--color-card))] px-3 py-2 text-xs">
-              <label className="inline-flex cursor-pointer items-center gap-1.5">
+            <div
+              className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-[var(--color-primary)]/20 bg-[color-mix(in_oklab,var(--color-primary)_6%,var(--color-card))] px-3 py-2.5 text-xs"
+              role="toolbar"
+              aria-label="批量操作"
+            >
+              <label className="inline-flex min-h-9 cursor-pointer items-center gap-2">
                 <input
                   type="checkbox"
-                  className="size-3.5 accent-[var(--color-primary)]"
+                  className="size-4 accent-[var(--color-primary)]"
                   checked={allVisibleSelected}
                   onChange={toggleSelectAll}
                 />
                 全选本页
               </label>
-              <span className="tabular-nums text-[var(--color-foreground)]">
+              <span className="tabular-nums text-[var(--color-foreground)]" aria-live="polite">
                 已选 {selected.size}
+              </span>
+              <span className="hidden text-[var(--color-muted-foreground)] sm:inline">
+                Esc 取消
               </span>
               <div className="ml-auto flex flex-wrap items-center gap-1.5">
                 <Button
                   size="sm"
                   variant="secondary"
-                  className="h-7"
+                  className="min-h-9"
                   disabled={bulkBusy}
                   onClick={() => runBulk("organize")}
                 >
@@ -597,7 +622,7 @@ export default function HomePage() {
                 <Button
                   size="sm"
                   variant="outline"
-                  className="h-7"
+                  className="min-h-9"
                   disabled={bulkBusy}
                   onClick={() => runBulk("retry")}
                 >
@@ -607,7 +632,7 @@ export default function HomePage() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="h-7 text-[var(--color-destructive)]"
+                  className="min-h-9 text-[var(--color-destructive)]"
                   disabled={bulkBusy}
                   onClick={() => runBulk("trash")}
                 >
@@ -617,7 +642,7 @@ export default function HomePage() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="h-7"
+                  className="min-h-9"
                   onClick={() => setSelected(new Set())}
                 >
                   取消

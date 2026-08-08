@@ -16,20 +16,22 @@ export function Empty({
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center px-6 py-16 text-center",
+        "flex flex-col items-center justify-center px-6 py-20 text-center",
         className
       )}
     >
       {icon && (
-        <div className="mb-3 flex size-10 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-muted)] text-[var(--color-muted-foreground)]">
+        <div className="mb-4 flex size-11 items-center justify-center rounded-[12px] border border-[var(--color-border)] bg-[var(--color-muted)]/80 text-[var(--color-muted-foreground)]">
           {icon}
         </div>
       )}
-      <div className="text-sm font-medium tracking-tight">{title}</div>
+      <div className="text-[15px] font-medium tracking-tight">{title}</div>
       {description && (
-        <p className="mt-1.5 max-w-sm text-xs text-[var(--color-muted-foreground)]">{description}</p>
+        <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-[var(--color-muted-foreground)]">
+          {description}
+        </p>
       )}
-      {action && <div className="mt-4">{action}</div>}
+      {action && <div className="mt-5">{action}</div>}
     </div>
   );
 }

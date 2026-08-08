@@ -47,6 +47,7 @@ export function initDb() {
       title TEXT,
       author TEXT,
       thumbnail_key TEXT,
+      media_json TEXT,
       note TEXT,
       category_id TEXT,
       status TEXT NOT NULL DEFAULT 'inbox',
@@ -87,6 +88,9 @@ export function initDb() {
   }
   if (!cardCols.includes("external_id")) {
     sqlite.exec("ALTER TABLE cards ADD COLUMN external_id TEXT");
+  }
+  if (!cardCols.includes("media_json")) {
+    sqlite.exec("ALTER TABLE cards ADD COLUMN media_json TEXT");
   }
   sqlite.exec(
     "CREATE INDEX IF NOT EXISTS cards_external_id_idx ON cards(import_source, external_id)"

@@ -25,23 +25,29 @@ export const youtubeAdapter: PlatformAdapter = {
           author_name?: string;
           thumbnail_url?: string;
         };
+        const thumb =
+          data.thumbnail_url ||
+          (id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null);
         return {
           platform: "youtube",
           title: data.title,
           author: data.author_name,
-          thumbnailUrl:
-            data.thumbnail_url ||
-            (id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null),
+          thumbnailUrl: thumb,
+          media: thumb
+            ? [{ type: "image" as const, url: thumb, posterUrl: null }]
+            : null,
           raw: data,
         };
       }
     } catch {
       /* fallthrough */
     }
+    const thumb = id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
     return {
       platform: "youtube",
       title: id ? `YouTube ${id}` : "YouTube",
-      thumbnailUrl: id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null,
+      thumbnailUrl: thumb,
+      media: thumb ? [{ type: "image" as const, url: thumb, posterUrl: null }] : null,
     };
   },
 };

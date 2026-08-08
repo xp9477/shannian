@@ -2,6 +2,7 @@ import { and, desc, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import type {
   AiStatus,
+  CardMediaItem,
   CardStatus,
   FetchStatus,
   FlashCard,
@@ -52,12 +53,35 @@ function ftsSync(cardId: string, fields: {
     );
 }
 
+function parseMediaJson(raw: string | null | undefined): CardMediaItem[] {
+  if (!raw?.trim()) return [];
+  try {
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter(
+        (m): m is CardMediaItem =>
+          Boolean(m && typeof m === "object" && typeof (m as CardMediaItem).url === "string")
+      )
+      .map((m) => ({
+        type: m.type === "video" || m.type === "gif" ? m.type : "image",
+        url: m.url,
+        posterUrl: m.posterUrl ?? null,
+        width: m.width ?? null,
+        height: m.height ?? null,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 export async function toFlashCard(row: typeof cards.$inferSelect): Promise<FlashCard> {
   let categoryName: string | null = null;
   if (row.categoryId) {
     const cat = await db.select().from(categories).where(eq(categories.id, row.categoryId)).get();
     categoryName = cat?.name ?? null;
   }
+  const media = parseMediaJson(row.mediaJson);
   return {
     id: row.id,
     url: row.url,
@@ -66,7 +90,14 @@ export async function toFlashCard(row: typeof cards.$inferSelect): Promise<Flash
     title: row.title,
     author: row.author,
     thumbnailKey: row.thumbnailKey,
-    thumbnailUrl: row.thumbnailKey ? `/api/media/${encodeURIComponent(row.thumbnailKey)}` : null,
+    thumbnailUrl: row.thumbnailKey
+      ? `/api/media/${encodeURIComponent(row.thumbnailKey)}`
+      : media[0]
+        ? media[0].type === "image"
+          ? media[0].url
+          : media[0].posterUrl || media[0].url
+        : null,
+    media,
     note: row.note,
     categoryId: row.categoryId,
     categoryName,
@@ -166,6 +197,7 @@ export async function createCard(input: {
     title: pureThoughtTitle,
     author: null,
     thumbnailKey: null,
+    mediaJson: null,
     note,
     categoryId: null,
     status: "inbox",
@@ -251,10 +283,17 @@ export async function enrichCard(cardId: string, opts?: { force?: boolean }) {
         meta.description ?? (force ? null : row.description);
       const nextExcerpt =
         meta.contentExcerpt ?? (force ? null : row.contentExcerpt);
+      const nextMedia =
+        meta.media && meta.media.length
+          ? JSON.stringify(meta.media)
+          : force
+            ? null
+            : row.mediaJson;
       const hasCore = Boolean(
         (nextTitle && !isShellTitle(nextTitle)) ||
           nextDescription?.trim() ||
-          nextExcerpt?.trim()
+          nextExcerpt?.trim() ||
+          (meta.media && meta.media.length)
       );
       await db
         .update(cards)
@@ -263,10 +302,11 @@ export async function enrichCard(cardId: string, opts?: { force?: boolean }) {
           title: nextTitle,
           author: nextAuthor,
           thumbnailKey,
+          mediaJson: nextMedia,
           description: nextDescription,
           contentExcerpt: nextExcerpt,
           fetchStatus: hasCore
-            ? nextAuthor || thumbnailKey || nextDescription
+            ? nextAuthor || thumbnailKey || nextDescription || nextMedia
               ? "ok"
               : "partial"
             : "partial",
@@ -824,6 +864,7 @@ export async function upsertImportedBookmark(input: {
     title,
     author,
     thumbnailKey: null,
+    mediaJson: null,
     note: null,
     categoryId: null,
     status: "inbox",

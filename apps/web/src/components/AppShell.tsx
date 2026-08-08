@@ -107,9 +107,9 @@ export function AppShell({
       className="flex h-full w-[15.5rem] flex-col border-r border-[var(--color-sidebar-border)] bg-[var(--color-sidebar)]"
       aria-label="主导航"
     >
-      <div className="flex h-14 items-center gap-2.5 px-4">
+      <div className="flex h-[3.75rem] items-center gap-2.5 px-4">
         <div
-          className="flex size-8 items-center justify-center rounded-xl bg-[var(--color-primary)] text-[13px] font-bold tracking-tight text-[var(--color-primary-foreground)] shadow-sm shadow-[color-mix(in_oklab,var(--color-primary)_35%,transparent)]"
+          className="flex size-8 items-center justify-center rounded-[10px] bg-[var(--color-primary)] text-[13px] font-bold tracking-tight text-[var(--color-primary-foreground)]"
           aria-hidden
         >
           闪
@@ -117,7 +117,7 @@ export function AppShell({
         <div className="min-w-0">
           <div className="truncate text-[14px] font-semibold tracking-tight">闪念</div>
           <div className="truncate text-[11px] text-[var(--color-muted-foreground)]">
-            灵感收件箱
+            分流台
           </div>
         </div>
         <Button
