@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
 import { sessions } from "../db/schema.js";
+import { sessionCookieSecure } from "../lib/cookie.js";
 import { generateToken, hashPassword, hashToken, verifyPassword } from "../lib/crypto.js";
 import { getSetting, setSetting } from "../lib/settings.js";
 import { checkLoginRate, requireAuth, type AuthEnv } from "../middleware/auth.js";
@@ -36,7 +37,7 @@ authRoutes.post("/login", async (c) => {
 
   setCookie(c, "shannian_session", token, {
     httpOnly: true,
-    secure: process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production",
+    secure: sessionCookieSecure(),
     sameSite: "Lax",
     path: "/",
     maxAge: SESSION_DAYS * 86400,

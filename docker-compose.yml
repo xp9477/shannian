@@ -1,20 +1,36 @@
+name: shannian
+
 services:
   shannian:
     build: .
+    image: shannian:local
+    container_name: shannian
     ports:
       - "8787:8787"
     environment:
       - PORT=8787
       - DATA_DIR=/data
       - WEB_DIST=/app/apps/web/dist
-      - COOKIE_SECURE=true
+      # 本机/局域网 HTTP 访问必须 false；走 HTTPS 反代时改成 true
+      - COOKIE_SECURE=false
       - NODE_ENV=production
-      # 可选：出站 HTTP 代理（设置页可覆盖）。例：http://host.docker.internal:7890
-      # - HTTP_PROXY=http://127.0.0.1:7890
-      # - HTTPS_PROXY=http://127.0.0.1:7890
+      # 可选：出站 HTTP 代理（设置页可覆盖）。容器内访问宿主机代理用 host.docker.internal
+      # - HTTP_PROXY=http://host.docker.internal:7890
+      # - HTTPS_PROXY=http://host.docker.internal:7890
     volumes:
-      - shannian_data:/data
+      - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
-volumes:
-  shannian_data:
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

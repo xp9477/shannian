@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/dist
+data
+.git
+.grok
+*.log
+**/*.tsbuildinfo
+docs
+design-system
+*.md
+.env
+.env.local

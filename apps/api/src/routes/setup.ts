@@ -9,6 +9,7 @@ import {
 } from "../lib/settings.js";
 import { requireAuth, type AuthEnv } from "../middleware/auth.js";
 import { setCookie } from "hono/cookie";
+import { sessionCookieSecure } from "../lib/cookie.js";
 import { generateToken, hashToken } from "../lib/crypto.js";
 import { db } from "../db/index.js";
 import { sessions } from "../db/schema.js";
@@ -41,7 +42,7 @@ setupRoutes.post("/password", async (c) => {
   });
   setCookie(c, "shannian_session", token, {
     httpOnly: true,
-    secure: process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production",
+    secure: sessionCookieSecure(),
     sameSite: "Lax",
     path: "/",
     maxAge: 30 * 86400,
