@@ -1,6 +1,6 @@
 # 闪念安全、架构与产品价值审查报告
 
-> 审查日期：2026-08-15<br>
+> 审查周期：2026-08-15—2026-08-19<br>
 > 授权范围：用户授权的本地仓库、运行配置和只读 SQLite 聚合检查<br>
 > 基线：`0b4ca25`（任何本轮改动前已推送到 `origin/main`）<br>
 > 结论：有价值，但不是“另一个 AI 书签库”；应聚焦“原生收藏债务的快速分流与可追溯交付”。
@@ -49,6 +49,7 @@
 | E-09 | 迁移/搜索/完整性复现 | `apps/api/src/services/cards.integration.test.ts` | n/a |
 | E-10 | 队列恢复/重试复现 | `apps/api/src/services/enrichment-queue.integration.test.ts` | n/a |
 | E-11 | Chromium 用户闭环 | `npm run test:e2e` | n/a（1/1 通过） |
+| E-12 | GitHub CI | Actions run `32205825437` | n/a（测试、构建、审计、Docker image build 全通过） |
 
 ### Timeline 摘要
 
@@ -76,7 +77,7 @@
 | F-10 X 时间线已有媒体却逐卡再请求 X | High reliability | 代码审查 | 中 | `x-import-job.ts`、`cards.ts` | 已修：媒体一次入库，worker 并发默认 2；尚缺 X fixture 集成测试 |
 | F-11 备份文档把本地缩略图误写成 MinIO | High ops | E-06 | 高 | README、`ops-backup.md` | 已修；JSON 明确降级为逻辑副本 |
 | F-12 Hono/Drizzle 命中生产依赖公告 | Medium | E-05 | 高 | `apps/api/package.json` | 已修至 Hono 4.13.2、Drizzle 0.45.2 |
-| F-13 零测试、零 CI，Docker 安装不可复现 | High engineering | E-03,E-04,E-06,E-11 | 中 | package scripts、CI、Dockerfile | 已修 API/浏览器 smoke/CI，Dockerfile 已改 `npm ci`；本机未实构建最终镜像 |
+| F-13 零测试、零 CI，Docker 安装不可复现 | High engineering | E-03,E-04,E-06,E-11,E-12 | 高 | package scripts、CI、Dockerfile | 已修 API/浏览器 smoke/CI，Dockerfile 使用 `npm ci`，远程 runner 已完成镜像构建 |
 | F-14 X 非官方 Cookie/Query ID 是单点政策风险 | Product/ops | E-02 | 高 | `services/import/` | 未消除，只能限速、显式风险和可替换 connector |
 | F-15 媒体仍主要引用远程 URL，会自然腐烂 | Product/retention | E-02 | 高 | card `media_json` | 未解决；当前定位应是索引/分流，不是永久归档 |
 | F-16 后台富化/AI 可覆盖并发用户编辑 | High integrity | E-09 | 高 | `cards.ts`、card schema | 部分修复：CAS + 用户标题/作者/分类锁；完整 provenance 仍属于目标模型 |
@@ -184,11 +185,11 @@ docker compose config --quiet
 - Chromium smoke 1/1 通过，覆盖首次初始化、捕获、跨状态搜索、保留、标题编辑和未配置 MinIO 的导出错误；
 - 生产依赖审计为 0；
 - fresh DB 与模拟旧 DB 的迁移、FTS 搜索和 `integrity_check` 通过；
-- Compose 解析通过，配置声明了默认回环、非 root、只读 rootfs、cap drop、资源/日志限制；最终镜像仍需在空间充足环境实测。
+- Compose 解析通过，配置声明了默认回环、非 root、只读 rootfs、cap drop、资源/日志限制；GitHub runner 上的最终镜像构建通过。
 
 尚未声称解决：
 
-- 本机磁盘不足，未实际构建/启动最终 Docker 镜像；CI 会构建，但发布前仍应人工验收；
+- 本机磁盘不足，未实际启动最终 Docker 镜像；CI 已构建通过，但带真实 bind mount/反代理/MinIO 的发布前人工验收仍是必要的；
 - 当前环境没有 Browser 插件，但已使用仓库 Playwright/Chromium 跑 headless smoke；尚未覆盖编辑中轮询、登录限流和真实 MinIO 成功交付；
 - 设置加密是可选项；不配置外部 key 时，数据库中的第三方凭证仍依赖 0600/0700 和宿主机权限保护；
 - X import 仍不能断点续跑，非官方接口也无法获得官方稳定性保证；
