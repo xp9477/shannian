@@ -13,12 +13,16 @@ import {
   normalizeXHandle,
   placeholderTitleFromText,
 } from "../title.js";
+import { hostnameMatches } from "../../lib/url.js";
 
 export const xAdapter: PlatformAdapter = {
   id: "x",
   match(url) {
-    const h = url.hostname.replace(/^www\./, "").toLowerCase();
-    return h === "x.com" || h === "twitter.com" || h === "t.co" || h === "mobile.twitter.com";
+    return (
+      hostnameMatches(url.hostname, "x.com") ||
+      hostnameMatches(url.hostname, "twitter.com") ||
+      hostnameMatches(url.hostname, "t.co")
+    );
   },
   async fetchMeta(url) {
     const tweetId = parseTweetIdFromUrl(url.toString());
@@ -110,6 +114,7 @@ async function webFallback(
     raw: {
       source: "web_fallback",
       ...rawExtra,
+      web: meta.raw,
       ogTitle,
       cleanedShellTitle: isShellTitle(ogTitle),
     },

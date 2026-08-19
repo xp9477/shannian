@@ -55,8 +55,16 @@ export function AppShell({
   }
 
   function goHome(next: NavFilter) {
-    onFilterChange?.(next);
-    if (location.pathname !== "/") navigate("/");
+    if (location.pathname === "/" && onFilterChange) {
+      onFilterChange(next);
+    } else {
+      const params = new URLSearchParams();
+      if (next.status) params.set("status", next.status);
+      if (next.thoughtsOnly) params.set("thoughtsOnly", "1");
+      if (next.categoryId) params.set("categoryId", next.categoryId);
+      const search = params.toString();
+      navigate(search ? `/?${search}` : "/");
+    }
     setMobileNav(false);
   }
 
@@ -169,7 +177,7 @@ export function AppShell({
             isHome && status === "organized" && !thoughtsOnly,
             () => goHome({ status: "organized" }),
             <CheckCircle2 className="size-4 shrink-0 opacity-80" aria-hidden />,
-            "沉淀"
+            "已保留"
           )}
           {navBtn(
             isHome && thoughtsOnly,

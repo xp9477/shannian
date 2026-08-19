@@ -1,6 +1,6 @@
 import type { PlatformAdapter } from "./types.js";
 import { extractArticleExcerpt } from "../extract-content.js";
-import { outboundFetch } from "../../lib/http.js";
+import { fetchPublicHtml } from "../../lib/public-fetch.js";
 
 function pickMeta(html: string, prop: string): string | null {
   const patterns = [
@@ -43,24 +43,39 @@ export const webAdapter: PlatformAdapter = {
   },
   async fetchMeta(url) {
     try {
-      const res = await outboundFetch(url.toString(), {
+      const res = await fetchPublicHtml(url, {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (compatible; ShannianBot/0.1; +https://github.com/local/shannian)",
           Accept: "text/html,application/xhtml+xml",
         },
-        redirect: "follow",
-        signal: AbortSignal.timeout(12000),
+        timeoutMs: 12_000,
       });
       if (!res.ok) {
-        return { platform: "web", title: url.hostname };
+        return {
+          platform: "web",
+          title: url.hostname,
+          raw: {
+            status: res.status,
+            finalUrl: res.finalUrl.toString(),
+            fetchError: `WEB_HTTP_${res.status}`,
+          },
+        };
       }
-      const html = await res.text();
+      const html = res.body.toString("utf8");
       const description =
         pickMeta(html, "og:description") || pickMeta(html, "description");
-      const contentExcerpt = extractArticleExcerpt(html, url.toString());
-      const image =
+      const contentExcerpt = extractArticleExcerpt(html, res.finalUrl.toString());
+      const imageValue =
         pickMeta(html, "og:image") || pickMeta(html, "twitter:image");
+      let image: string | null = null;
+      if (imageValue) {
+        try {
+          image = new URL(imageValue, res.finalUrl).toString();
+        } catch {
+          image = null;
+        }
+      }
       return {
         platform: "web",
         title: pickTitle(html) || url.hostname,
@@ -71,6 +86,8 @@ export const webAdapter: PlatformAdapter = {
         contentExcerpt,
         raw: {
           status: res.status,
+          finalUrl: res.finalUrl.toString(),
+          redirects: res.redirectCount,
           hasDescription: Boolean(description),
           excerptLen: contentExcerpt?.length ?? 0,
         },
@@ -79,7 +96,7 @@ export const webAdapter: PlatformAdapter = {
       return {
         platform: "web",
         title: url.hostname,
-        raw: { error: String(e) },
+        raw: { fetchError: String(e) },
       };
     }
   },

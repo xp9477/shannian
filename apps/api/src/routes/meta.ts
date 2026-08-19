@@ -3,25 +3,33 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { requireAuth, type AuthEnv } from "../middleware/auth.js";
-import { db } from "../db/index.js";
+import { db, sqlite } from "../db/index.js";
 import { categories } from "../db/schema.js";
 import {
   getAiSettingsPublic,
   getMinioSettingsPublic,
   getSetupStatus,
-  setSetting,
+  setSettings,
 } from "../lib/settings.js";
 import { getHttpProxyPublic, setHttpProxyUrl, testHttpProxy } from "../lib/http.js";
 import { testAiConnection } from "../services/ai.js";
 import { testMinioConnection } from "../services/minio.js";
 import * as cardsService from "../services/cards.js";
 import { readThumbnail } from "../services/thumbs.js";
+import {
+  aiBaseUrlSchema,
+  minioEndpointSchema,
+  normalizeAiBaseUrl,
+  normalizeMinioEndpoint,
+  settingValueSchema,
+  shortTextSchema,
+} from "../lib/validation.js";
 
 export const metaRoutes = new Hono<AuthEnv>();
 
 metaRoutes.get("/media/:key{.+}", requireAuth, async (c) => {
-  const key = decodeURIComponent(c.req.param("key"));
   try {
+    const key = decodeURIComponent(c.req.param("key"));
     const local = await readThumbnail(key);
     if (!local) return c.json({ error: "NOT_FOUND" }, 404);
     return new Response(local.stream as unknown as ReadableStream, {
@@ -47,7 +55,10 @@ authed.get("/categories", async (c) => {
 });
 
 authed.post("/categories", async (c) => {
-  const body = z.object({ name: z.string().min(1) }).parse(await c.req.json());
+  const body = z
+    .object({ name: shortTextSchema.trim().min(1).max(100) })
+    .strict()
+    .parse(await c.req.json());
   const id = nanoid();
   const count = (await db.select().from(categories).all()).length;
   await db.insert(categories).values({
@@ -60,7 +71,10 @@ authed.post("/categories", async (c) => {
 });
 
 authed.patch("/categories/:id", async (c) => {
-  const body = z.object({ name: z.string().min(1) }).parse(await c.req.json());
+  const body = z
+    .object({ name: shortTextSchema.trim().min(1).max(100) })
+    .strict()
+    .parse(await c.req.json());
   await db
     .update(categories)
     .set({ name: body.name.trim() })
@@ -69,7 +83,14 @@ authed.patch("/categories/:id", async (c) => {
 });
 
 authed.delete("/categories/:id", async (c) => {
-  await db.delete(categories).where(eq(categories.id, c.req.param("id")));
+  const id = c.req.param("id");
+  const removeCategory = sqlite.transaction(() => {
+    sqlite
+      .prepare("UPDATE cards SET category_id = NULL, updated_at = ? WHERE category_id = ?")
+      .run(Date.now(), id);
+    sqlite.prepare("DELETE FROM categories WHERE id = ?").run(id);
+  });
+  removeCategory();
   return c.json({ ok: true });
 });
 
@@ -94,36 +115,40 @@ authed.get("/settings", async (c) => {
 authed.put("/settings/ai", async (c) => {
   const body = z
     .object({
-      baseUrl: z.string().min(1),
-      apiKey: z.string().optional(),
-      model: z.string().min(1),
-    })
+      baseUrl: aiBaseUrlSchema,
+      apiKey: settingValueSchema.optional(),
+      model: shortTextSchema.min(1),
+    }).strict()
     .parse(await c.req.json());
-  await setSetting("ai_base_url", body.baseUrl.replace(/\/$/, ""));
-  await setSetting("ai_model", body.model);
-  if (body.apiKey) await setSetting("ai_api_key", body.apiKey);
+  await setSettings({
+    ai_base_url: normalizeAiBaseUrl(body.baseUrl),
+    ai_model: body.model,
+    ai_api_key: body.apiKey || undefined,
+  });
   return c.json({ ai: await getAiSettingsPublic() });
 });
 
 authed.put("/settings/minio", async (c) => {
   const body = z
     .object({
-      endpoint: z.string().min(1),
-      bucket: z.string().min(1),
-      accessKey: z.string().optional(),
-      secretKey: z.string().optional(),
-      region: z.string().optional(),
-      thumbsPrefix: z.string().optional(),
-      vaultPrefix: z.string().optional(),
-    })
+      endpoint: minioEndpointSchema,
+      bucket: shortTextSchema.min(1),
+      accessKey: settingValueSchema.optional(),
+      secretKey: settingValueSchema.optional(),
+      region: shortTextSchema.optional(),
+      thumbsPrefix: shortTextSchema.optional(),
+      vaultPrefix: shortTextSchema.optional(),
+    }).strict()
     .parse(await c.req.json());
-  await setSetting("minio_endpoint", body.endpoint);
-  await setSetting("minio_bucket", body.bucket);
-  if (body.accessKey) await setSetting("minio_access_key", body.accessKey);
-  if (body.secretKey) await setSetting("minio_secret_key", body.secretKey);
-  if (body.region) await setSetting("minio_region", body.region);
-  if (body.thumbsPrefix) await setSetting("minio_thumbs_prefix", body.thumbsPrefix);
-  if (body.vaultPrefix) await setSetting("minio_vault_prefix", body.vaultPrefix);
+  await setSettings({
+    minio_endpoint: normalizeMinioEndpoint(body.endpoint),
+    minio_bucket: body.bucket,
+    minio_access_key: body.accessKey || undefined,
+    minio_secret_key: body.secretKey || undefined,
+    minio_region: body.region || undefined,
+    minio_thumbs_prefix: body.thumbsPrefix || undefined,
+    minio_vault_prefix: body.vaultPrefix || undefined,
+  });
   return c.json({ minio: await getMinioSettingsPublic() });
 });
 
@@ -131,8 +156,8 @@ authed.put("/settings/proxy", async (c) => {
   const body = z
     .object({
       /** Empty string clears settings proxy (env may still apply) */
-      proxyUrl: z.string(),
-    })
+      proxyUrl: settingValueSchema,
+    }).strict()
     .parse(await c.req.json());
   try {
     await setHttpProxyUrl(body.proxyUrl.trim() ? body.proxyUrl : null);

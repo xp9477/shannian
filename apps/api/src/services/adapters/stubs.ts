@@ -1,5 +1,6 @@
 import type { PlatformAdapter } from "./types.js";
 import { webAdapter } from "./web.js";
+import { hostnameMatches } from "../../lib/url.js";
 
 function stub(id: PlatformAdapter["id"], hosts: (h: string) => boolean): PlatformAdapter {
   return {
@@ -23,11 +24,13 @@ function stub(id: PlatformAdapter["id"], hosts: (h: string) => boolean): Platfor
 }
 
 export const xiaohongshuAdapter = stub("xiaohongshu", (h) =>
-  h.includes("xiaohongshu.com") || h === "xhslink.com"
+  hostnameMatches(h, "xiaohongshu.com") || hostnameMatches(h, "xhslink.com")
 );
 export const douyinAdapter = stub("douyin", (h) =>
-  h.includes("douyin.com") || h.includes("iesdouyin.com")
+  hostnameMatches(h, "douyin.com") || hostnameMatches(h, "iesdouyin.com")
 );
 export const telegramAdapter = stub("telegram", (h) =>
-  h === "t.me" || h.includes("telegram.org") || h.includes("telegram.me")
+  hostnameMatches(h, "t.me") ||
+  hostnameMatches(h, "telegram.org") ||
+  hostnameMatches(h, "telegram.me")
 );

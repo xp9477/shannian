@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import type { SetupStatus } from "@shannian/shared";
 import { api } from "./lib/api";
 import LoginPage from "./pages/LoginPage";
 import SetupPage from "./pages/SetupPage";
@@ -11,7 +12,7 @@ import ImportPage from "./pages/ImportPage";
 
 type Boot =
   | { kind: "loading" }
-  | { kind: "setup" }
+  | { kind: "setup"; status: SetupStatus }
   | { kind: "login" }
   | { kind: "app" };
 
@@ -20,23 +21,31 @@ export default function App() {
   const navigate = useNavigate();
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const status = await api.setupStatus();
+        if (cancelled) return;
         if (!status.initialized) {
-          setBoot({ kind: "setup" });
+          setBoot({ kind: "setup", status });
           return;
         }
         try {
           await api.me();
+          if (cancelled) return;
           setBoot({ kind: "app" });
         } catch {
+          if (cancelled) return;
           setBoot({ kind: "login" });
         }
       } catch {
+        if (cancelled) return;
         setBoot({ kind: "login" });
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (boot.kind === "loading") {
@@ -50,6 +59,7 @@ export default function App() {
   if (boot.kind === "setup") {
     return (
       <SetupPage
+        status={boot.status}
         onDone={() => {
           setBoot({ kind: "app" });
           navigate("/");

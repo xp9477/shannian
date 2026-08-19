@@ -45,18 +45,21 @@ export default function SettingsPage() {
     source: string;
     effectiveUrl: string | null;
     hasProxy: boolean;
+    hasCredentials: boolean;
   } | null>(null);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   const [newCat, setNewCat] = useState("");
   const [pw, setPw] = useState({ current: "", next: "" });
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       const [settings, cats, count] = await Promise.all([
         api.settings(),
         api.categories(),
         api.inboxCount(),
       ]);
+      if (cancelled) return;
       setAi({ baseUrl: settings.ai.baseUrl, apiKey: "", model: settings.ai.model });
       setAiHint(settings.ai.keyHint);
       setMinio({
@@ -76,12 +79,18 @@ export default function SettingsPage() {
               source: settings.proxy.source,
               effectiveUrl: settings.proxy.effectiveUrl,
               hasProxy: settings.proxy.hasProxy,
+              hasCredentials: settings.proxy.hasCredentials,
             }
           : null
       );
       setCategories(cats.items);
       setInbox(count.count);
-    })().catch((e) => toast.error(String(e)));
+    })().catch((e) => {
+      if (!cancelled) toast.error(e instanceof Error ? e.message : String(e));
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
@@ -100,10 +109,14 @@ export default function SettingsPage() {
 
         <Section
           title="HTTP 代理"
-          desc="出站请求（X、网页解析、缩略图、AI 等）。设置优先；留空则用环境变量 HTTP_PROXY / HTTPS_PROXY。"
+          desc="用于 X、AI 等受信目标。公开网页/缩略图为防 SSRF 会直连并固定已校验 IP，不经此代理。"
         >
           <Input
-            placeholder="http://127.0.0.1:7890  或  http://user:pass@host:port"
+            placeholder={
+              proxyMeta?.hasCredentials
+                ? "已保存含凭证的代理；输入新地址才会替换"
+                : "http://127.0.0.1:7890  或  http://user:pass@host:port"
+            }
             value={proxyUrl}
             onChange={(e) => setProxyUrl(e.target.value)}
           />
@@ -122,6 +135,7 @@ export default function SettingsPage() {
           )}
           <div className="flex flex-wrap gap-2">
             <Button
+              disabled={!proxyUrl.trim() && Boolean(proxyMeta?.hasProxy)}
               onClick={async () => {
                 try {
                   const r = await api.saveProxy(proxyUrl.trim());
@@ -130,6 +144,7 @@ export default function SettingsPage() {
                     source: r.proxy.source,
                     effectiveUrl: r.proxy.effectiveUrl,
                     hasProxy: r.proxy.hasProxy,
+                    hasCredentials: r.proxy.hasCredentials,
                   });
                   toast.success(r.proxy.hasProxy ? "代理已保存" : "已清除设置中的代理");
                 } catch (e) {
@@ -142,8 +157,12 @@ export default function SettingsPage() {
             <Button
               variant="outline"
               onClick={async () => {
-                const r = await api.testProxy();
-                r.ok ? toast.success(r.message) : toast.error(r.message);
+                try {
+                  const r = await api.testProxy();
+                  r.ok ? toast.success(r.message) : toast.error(r.message);
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "代理测试失败");
+                }
               }}
             >
               测试代理
@@ -151,14 +170,19 @@ export default function SettingsPage() {
             <Button
               variant="ghost"
               onClick={async () => {
-                setProxyUrl("");
-                const r = await api.saveProxy("");
-                setProxyMeta({
-                  source: r.proxy.source,
-                  effectiveUrl: r.proxy.effectiveUrl,
-                  hasProxy: r.proxy.hasProxy,
-                });
-                toast.success("已清除设置代理（仍可读环境变量）");
+                try {
+                  const r = await api.saveProxy("");
+                  setProxyUrl("");
+                  setProxyMeta({
+                    source: r.proxy.source,
+                    effectiveUrl: r.proxy.effectiveUrl,
+                    hasProxy: r.proxy.hasProxy,
+                    hasCredentials: r.proxy.hasCredentials,
+                  });
+                  toast.success("已清除设置代理（仍可读环境变量）");
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "清除代理失败");
+                }
               }}
             >
               清除
@@ -173,6 +197,9 @@ export default function SettingsPage() {
             onChange={(e) => setAi({ ...ai, baseUrl: e.target.value })}
           />
           <Input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
             placeholder={aiHint ? `API Key（已配置 ${aiHint}，留空不改）` : "API Key"}
             value={ai.apiKey}
             onChange={(e) => setAi({ ...ai, apiKey: e.target.value })}
@@ -185,12 +212,22 @@ export default function SettingsPage() {
           <div className="flex gap-2">
             <Button
               onClick={async () => {
-                await api.saveAi({
-                  baseUrl: ai.baseUrl,
-                  model: ai.model,
-                  apiKey: ai.apiKey || undefined,
-                });
-                toast.success("AI 已保存");
+                try {
+                  const saved = await api.saveAi({
+                    baseUrl: ai.baseUrl,
+                    model: ai.model,
+                    apiKey: ai.apiKey || undefined,
+                  });
+                  setAi({
+                    baseUrl: saved.ai.baseUrl,
+                    model: saved.ai.model,
+                    apiKey: "",
+                  });
+                  setAiHint(saved.ai.keyHint);
+                  toast.success("AI 已保存");
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "AI 保存失败");
+                }
               }}
             >
               保存
@@ -198,8 +235,12 @@ export default function SettingsPage() {
             <Button
               variant="outline"
               onClick={async () => {
-                const r = await api.testAi();
-                r.ok ? toast.success(r.message) : toast.error(r.message);
+                try {
+                  const r = await api.testAi();
+                  r.ok ? toast.success(r.message) : toast.error(r.message);
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "AI 连接测试失败");
+                }
               }}
             >
               测试连接
@@ -250,16 +291,30 @@ export default function SettingsPage() {
               <div className="flex gap-2">
                 <Button
                   onClick={async () => {
-                    await api.saveMinio({
-                      endpoint: minio.endpoint,
-                      bucket: minio.bucket,
-                      accessKey: minio.accessKey || undefined,
-                      secretKey: minio.secretKey || undefined,
-                      region: minio.region,
-                      thumbsPrefix: minio.thumbsPrefix,
-                      vaultPrefix: minio.vaultPrefix,
-                    });
-                    toast.success("MinIO 已保存");
+                    try {
+                      const saved = await api.saveMinio({
+                        endpoint: minio.endpoint,
+                        bucket: minio.bucket,
+                        accessKey: minio.accessKey || undefined,
+                        secretKey: minio.secretKey || undefined,
+                        region: minio.region,
+                        thumbsPrefix: minio.thumbsPrefix,
+                        vaultPrefix: minio.vaultPrefix,
+                      });
+                      setMinio({
+                        endpoint: saved.minio.endpoint,
+                        bucket: saved.minio.bucket,
+                        accessKey: "",
+                        secretKey: "",
+                        region: saved.minio.region,
+                        thumbsPrefix: saved.minio.thumbsPrefix,
+                        vaultPrefix: saved.minio.vaultPrefix,
+                      });
+                      setMinioHint(saved.minio.accessKeyHint);
+                      toast.success("MinIO 已保存");
+                    } catch (e) {
+                      toast.error(e instanceof Error ? e.message : "MinIO 保存失败");
+                    }
                   }}
                 >
                   保存
@@ -267,8 +322,12 @@ export default function SettingsPage() {
                 <Button
                   variant="outline"
                   onClick={async () => {
-                    const r = await api.testMinio();
-                    r.ok ? toast.success(r.message) : toast.error(r.message);
+                    try {
+                      const r = await api.testMinio();
+                      r.ok ? toast.success(r.message) : toast.error(r.message);
+                    } catch (e) {
+                      toast.error(e instanceof Error ? e.message : "MinIO 连接测试失败");
+                    }
                   }}
                 >
                   测试连接
@@ -289,8 +348,13 @@ export default function SettingsPage() {
                 <button
                   className="text-[var(--color-destructive)]"
                   onClick={async () => {
-                    await api.deleteCategory(c.id);
-                    setCategories((xs) => xs.filter((x) => x.id !== c.id));
+                    if (!confirm(`删除分类「${c.name}」？相关卡片将变为未分类。`)) return;
+                    try {
+                      await api.deleteCategory(c.id);
+                      setCategories((xs) => xs.filter((x) => x.id !== c.id));
+                    } catch (e) {
+                      toast.error(e instanceof Error ? e.message : "删除分类失败");
+                    }
                   }}
                 >
                   ×
@@ -303,9 +367,13 @@ export default function SettingsPage() {
             <Button
               onClick={async () => {
                 if (!newCat.trim()) return;
-                await api.createCategory(newCat.trim());
-                setNewCat("");
-                setCategories((await api.categories()).items);
+                try {
+                  await api.createCategory(newCat.trim());
+                  setNewCat("");
+                  setCategories((await api.categories()).items);
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "添加分类失败");
+                }
               }}
             >
               添加
@@ -315,34 +383,38 @@ export default function SettingsPage() {
 
         <Section
           title="数据与备份"
-          desc="元数据可随时导出；完整恢复还需复制 SQLite 与 MinIO（见仓库 docs/ops-backup.md）。"
+          desc="JSON 只是活动卡片的逻辑副本；完整恢复需复制整个 data、Obsidian 对象和外部加密密钥。"
         >
           <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/50 px-3 py-2.5 text-xs leading-relaxed text-[var(--color-muted-foreground)]">
             <p className="font-medium text-[var(--color-foreground)]">建议定期备份</p>
             <ol className="mt-1.5 list-decimal space-y-0.5 pl-4">
-              <li>下方导出 JSON（卡片元数据）</li>
-              <li>停服务后复制 data 目录下的 shannian.db</li>
-              <li>如启用 MinIO：备份 thumbs / vault 前缀</li>
+              <li>下方导出活动卡片 JSON（不能直接恢复）</li>
+              <li>停服务后复制整个 data 目录（数据库 + thumbs）</li>
+              <li>如启用 MinIO：备份 vault-export 前缀；另存设置加密密钥</li>
             </ol>
           </div>
           <Button
             variant="outline"
             className="min-h-10 w-full sm:w-auto"
             onClick={async () => {
-              const data = await api.exportAll();
-              const blob = new Blob([JSON.stringify(data, null, 2)], {
-                type: "application/json",
-              });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = `shannian-export-${new Date().toISOString().slice(0, 10)}.json`;
-              a.click();
-              URL.revokeObjectURL(url);
-              toast.success("已导出 JSON");
+              try {
+                const data = await api.exportAll();
+                const blob = new Blob([JSON.stringify(data, null, 2)], {
+                  type: "application/json",
+                });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `shannian-export-${new Date().toISOString().slice(0, 10)}.json`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 0);
+                toast.success("已导出 JSON");
+              } catch (e) {
+                toast.error(e instanceof Error ? e.message : "导出 JSON 失败");
+              }
             }}
           >
-            导出全部 JSON
+            导出活动卡片 JSON
           </Button>
         </Section>
 
@@ -376,8 +448,12 @@ export default function SettingsPage() {
             <Button
               variant="outline"
               onClick={async () => {
-                await api.logout();
-                navigate(0);
+                try {
+                  await api.logout();
+                  navigate(0);
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "登出失败");
+                }
               }}
             >
               登出
