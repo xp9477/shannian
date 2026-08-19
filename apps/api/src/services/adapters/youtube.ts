@@ -1,8 +1,9 @@
 import type { PlatformAdapter } from "./types.js";
-import { outboundFetch } from "../../lib/http.js";
+import { outboundFetch, readResponseJson } from "../../lib/http.js";
+import { hostnameMatches } from "../../lib/url.js";
 
 function videoId(url: URL): string | null {
-  if (url.hostname.includes("youtu.be")) {
+  if (hostnameMatches(url.hostname, "youtu.be")) {
     return url.pathname.slice(1).split("/")[0] || null;
   }
   return url.searchParams.get("v") || url.pathname.match(/\/shorts\/([^/]+)/)?.[1] || null;
@@ -11,8 +12,7 @@ function videoId(url: URL): string | null {
 export const youtubeAdapter: PlatformAdapter = {
   id: "youtube",
   match(url) {
-    const h = url.hostname.replace(/^www\./, "");
-    return h === "youtube.com" || h === "m.youtube.com" || h === "youtu.be" || h === "music.youtube.com";
+    return hostnameMatches(url.hostname, "youtube.com") || hostnameMatches(url.hostname, "youtu.be");
   },
   async fetchMeta(url) {
     const id = videoId(url);
@@ -20,11 +20,11 @@ export const youtubeAdapter: PlatformAdapter = {
     try {
       const res = await outboundFetch(oembedUrl, { signal: AbortSignal.timeout(10000) });
       if (res.ok) {
-        const data = (await res.json()) as {
+        const data = await readResponseJson<{
           title?: string;
           author_name?: string;
           thumbnail_url?: string;
-        };
+        }>(res, 512 * 1024);
         const thumb =
           data.thumbnail_url ||
           (id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null);
@@ -39,6 +39,7 @@ export const youtubeAdapter: PlatformAdapter = {
           raw: data,
         };
       }
+      await res.body?.cancel().catch(() => undefined);
     } catch {
       /* fallthrough */
     }

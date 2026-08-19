@@ -5,7 +5,11 @@
  */
 
 import type { CardMediaItem } from "@shannian/shared";
-import { outboundFetch } from "../../lib/http.js";
+import {
+  outboundFetch,
+  readResponseJson,
+  readResponseText,
+} from "../../lib/http.js";
 
 export interface XCredentials {
   authToken: string;
@@ -101,30 +105,39 @@ export async function xRequest(
   init?: RequestInit & { timeoutMs?: number }
 ): Promise<Response> {
   const url = pathOrUrl.startsWith("http") ? pathOrUrl : `https://x.com${pathOrUrl}`;
-  const timeoutMs = init?.timeoutMs ?? 30000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await outboundFetch(url, {
-      ...init,
-      signal: controller.signal,
-      headers: {
-        authorization: WEB_BEARER,
-        cookie: buildCookie(creds),
-        "x-csrf-token": creds.ct0,
-        "x-twitter-auth-type": "OAuth2Session",
-        "x-twitter-active-user": "yes",
-        "x-twitter-client-language": "en",
-        "content-type": "application/json",
-        accept: "*/*",
-        "user-agent":
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        ...(init?.headers || {}),
-      },
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+  const {
+    timeoutMs = 30_000,
+    signal: externalSignal,
+    headers: requestHeaders,
+    ...requestInit
+  } = init || {};
+  // Keep the deadline alive after response headers arrive: callers still need
+  // it while consuming a bounded response body.
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = externalSignal
+    ? AbortSignal.any([externalSignal, timeoutSignal])
+    : timeoutSignal;
+  return outboundFetch(url, {
+    ...requestInit,
+    signal,
+    headers: {
+      authorization: WEB_BEARER,
+      cookie: buildCookie(creds),
+      "x-csrf-token": creds.ct0,
+      "x-twitter-auth-type": "OAuth2Session",
+      "x-twitter-active-user": "yes",
+      "x-twitter-client-language": "en",
+      "content-type": "application/json",
+      accept: "*/*",
+      "user-agent":
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      ...(requestHeaders || {}),
+    },
+  });
+}
+
+async function cancelResponse(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
 }
 
 function extractScreenNameFromViewer(json: unknown): string | null {
@@ -167,10 +180,11 @@ export async function verifyXCredentials(creds: XCredentials): Promise<{ ok: boo
     const url = `https://x.com/i/api/graphql/${DEFAULT_VIEWER_QUERY_ID}/Viewer?${params}`;
     const res = await xRequest(url, creds, { method: "GET" });
     if (res.status === 401 || res.status === 403) {
+      await cancelResponse(res);
       return { ok: false, message: "凭证无效或已过期，请更新 auth_token / ct0" };
     }
     if (res.ok) {
-      const json = await res.json();
+      const json = await readResponseJson<unknown>(res, 8 * 1024 * 1024);
       const screen = extractScreenNameFromViewer(json);
       // Still probe bookmarks so import path is validated
       try {
@@ -206,7 +220,7 @@ export async function verifyXCredentials(creds: XCredentials): Promise<{ ok: boo
         message: screen ? `已连接 @${screen}` : "凭证有效（Viewer OK）",
       };
     }
-    lastDetail = `Viewer HTTP ${res.status}: ${(await res.text().catch(() => "")).slice(0, 120)}`;
+    lastDetail = `Viewer HTTP ${res.status}: ${(await readResponseText(res, 16 * 1024).catch(() => "")).slice(0, 120)}`;
   } catch (e) {
     lastDetail = e instanceof Error ? e.message : String(e);
   }
@@ -351,24 +365,26 @@ export async function fetchBookmarksPage(
   const url = `https://x.com/i/api/graphql/${queryId}/Bookmarks?${params}`;
   const res = await xRequest(url, creds, { method: "GET" });
   if (res.status === 429) {
+    await cancelResponse(res);
     const err = new Error("RATE_LIMITED");
     (err as Error & { status: number }).status = 429;
     throw err;
   }
   if (res.status === 401 || res.status === 403) {
+    await cancelResponse(res);
     const err = new Error("AUTH_FAILED");
     (err as Error & { status: number }).status = res.status;
     throw err;
   }
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await readResponseText(res, 16 * 1024).catch(() => "");
     const err = new Error(
       `BOOKMARKS_HTTP_${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`
     );
     (err as Error & { status: number }).status = res.status;
     throw err;
   }
-  const json = await res.json();
+  const json = await readResponseJson<unknown>(res, 8 * 1024 * 1024);
   const items = extractTweetsFromTimeline(json);
   const nextCursor = extractBottomCursor(json);
   // If we got a cursor equal to request cursor, stop
@@ -391,12 +407,19 @@ export async function deleteBookmark(
       queryId: qid,
     }),
   });
-  if (res.status === 429) throw new Error("RATE_LIMITED");
-  if (res.status === 401 || res.status === 403) throw new Error("AUTH_FAILED");
+  if (res.status === 429) {
+    await cancelResponse(res);
+    throw new Error("RATE_LIMITED");
+  }
+  if (res.status === 401 || res.status === 403) {
+    await cancelResponse(res);
+    throw new Error("AUTH_FAILED");
+  }
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await readResponseText(res, 16 * 1024).catch(() => "");
     throw new Error(`DELETE_BOOKMARK_HTTP_${res.status}${text ? `: ${text.slice(0, 160)}` : ""}`);
   }
+  await cancelResponse(res);
 }
 
 export async function withBackoff<T>(
@@ -413,6 +436,7 @@ export async function withBackoff<T>(
       last = e;
       const msg = e instanceof Error ? e.message : String(e);
       if (msg !== "RATE_LIMITED" && !msg.includes("429")) throw e;
+      if (i === retries) break;
       await sleep(baseMs * Math.pow(2, i) + Math.random() * 500);
     }
   }
@@ -637,24 +661,26 @@ export async function fetchTweetById(
   const url = `https://x.com/i/api/graphql/${queryId}/TweetResultByRestId?${params}`;
   const res = await xRequest(url, creds, { method: "GET" });
   if (res.status === 429) {
+    await cancelResponse(res);
     const err = new Error("RATE_LIMITED");
     (err as Error & { status: number }).status = 429;
     throw err;
   }
   if (res.status === 401 || res.status === 403) {
+    await cancelResponse(res);
     const err = new Error("AUTH_FAILED");
     (err as Error & { status: number }).status = res.status;
     throw err;
   }
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await readResponseText(res, 16 * 1024).catch(() => "");
     throw new Error(
       `TWEET_HTTP_${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`
     );
   }
-  const json = (await res.json()) as {
+  const json = await readResponseJson<{
     data?: { tweetResult?: { result?: Record<string, unknown> } };
-  };
+  }>(res, 8 * 1024 * 1024);
   let result = json?.data?.tweetResult?.result;
   // Some payloads nest under tweet
   if (result?.__typename === "TweetWithVisibilityResults" && result.tweet) {

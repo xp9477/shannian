@@ -54,10 +54,19 @@ function normalizeProxyUrl(raw: string): string | null {
       // undici ProxyAgent is HTTP CONNECT proxy; socks not supported here
       throw new Error(`不支持的代理协议：${u.protocol}（请用 http:// 或 https://）`);
     }
+    if (!u.hostname || u.pathname !== "/" || u.search || u.hash) {
+      throw new Error("代理地址只能包含 HTTP(S) host、端口和可选账号密码");
+    }
     return u.toString().replace(/\/$/, "");
   } catch (e) {
-    if (e instanceof Error && e.message.startsWith("不支持")) throw e;
-    throw new Error(`代理地址无效：${t}`);
+    if (
+      e instanceof Error &&
+      (e.message.startsWith("不支持") || e.message.startsWith("代理地址只能"))
+    ) {
+      throw e;
+    }
+    // Do not reflect malformed input: it may itself contain proxy credentials.
+    throw new Error("代理地址无效");
   }
 }
 
@@ -89,6 +98,7 @@ export async function getHttpProxyPublic(): Promise<{
   effectiveUrl: string | null;
   source: "settings" | "env" | "none";
   hasProxy: boolean;
+  hasCredentials: boolean;
 }> {
   invalidateProxyCache();
   const stored = await getSetting(SETTING_KEY);
@@ -99,15 +109,23 @@ export async function getHttpProxyPublic(): Promise<{
     } catch {
       effective = null;
     }
+    const hasCredentials = proxyHasCredentials(effective);
     return {
-      proxyUrl: stored.trim(),
-      effectiveUrl: effective,
+      proxyUrl: hasCredentials ? "" : effective || "",
+      effectiveUrl: effective ? maskProxy(effective) : null,
       source: "settings",
       hasProxy: Boolean(effective),
+      hasCredentials,
     };
   }
   if (stored === "") {
-    return { proxyUrl: "", effectiveUrl: null, source: "none", hasProxy: false };
+    return {
+      proxyUrl: "",
+      effectiveUrl: null,
+      source: "none",
+      hasProxy: false,
+      hasCredentials: false,
+    };
   }
   const fromEnv = envProxy();
   if (fromEnv) {
@@ -117,14 +135,22 @@ export async function getHttpProxyPublic(): Promise<{
     } catch {
       effective = null;
     }
+    const hasCredentials = proxyHasCredentials(effective);
     return {
       proxyUrl: "",
-      effectiveUrl: effective,
+      effectiveUrl: effective ? maskProxy(effective) : null,
       source: "env",
       hasProxy: Boolean(effective),
+      hasCredentials,
     };
   }
-  return { proxyUrl: "", effectiveUrl: null, source: "none", hasProxy: false };
+  return {
+    proxyUrl: "",
+    effectiveUrl: null,
+    source: "none",
+    hasProxy: false,
+    hasCredentials: false,
+  };
 }
 
 export async function setHttpProxyUrl(url: string | null): Promise<void> {
@@ -191,6 +217,57 @@ export type OutboundFetchInit = RequestInit & {
   direct?: boolean;
 };
 
+export async function readResponseBuffer(
+  response: Response,
+  maxBytes: number
+): Promise<Buffer> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new TypeError("maxBytes must be a non-negative safe integer");
+  }
+  const lengthHeader = response.headers.get("content-length");
+  if (lengthHeader && /^\d+$/.test(lengthHeader)) {
+    const declared = Number(lengthHeader);
+    if (Number.isSafeInteger(declared) && declared > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`RESPONSE_BODY_TOO_LARGE:${maxBytes}`);
+    }
+  }
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`RESPONSE_BODY_TOO_LARGE:${maxBytes}`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), total);
+}
+
+export async function readResponseText(
+  response: Response,
+  maxBytes: number
+): Promise<string> {
+  return (await readResponseBuffer(response, maxBytes)).toString("utf8");
+}
+
+export async function readResponseJson<T>(
+  response: Response,
+  maxBytes: number
+): Promise<T> {
+  return JSON.parse(await readResponseText(response, maxBytes)) as T;
+}
+
 /**
  * Drop-in fetch for outbound calls. Uses HTTP proxy when configured.
  * Compatible with standard RequestInit (signal, headers, body, method, redirect).
@@ -242,23 +319,34 @@ export async function testHttpProxy(probeUrl = "https://api.x.com"): Promise<{
       headers: { Accept: "*/*", "User-Agent": "ShannianProxyTest/0.1" },
     });
     const ms = Date.now() - started;
+    await res.body?.cancel().catch(() => undefined);
     // Any HTTP response means TCP/proxy path works (401/403 from X is fine)
     return {
       ok: true,
       message: proxy
         ? `代理可用（经 ${maskProxy(proxy)} → HTTP ${res.status}，${ms}ms）`
         : `直连可用（HTTP ${res.status}，${ms}ms）`,
-      proxy,
+      proxy: proxy ? maskProxy(proxy) : null,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return {
       ok: false,
       message: proxy
-        ? `经代理失败：${msg}（代理 ${maskProxy(proxy)}）`
+        ? `经代理失败（代理 ${maskProxy(proxy)}）`
         : `直连失败：${msg}`,
-      proxy,
+      proxy: proxy ? maskProxy(proxy) : null,
     };
+  }
+}
+
+function proxyHasCredentials(url: string | null): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return Boolean(parsed.username || parsed.password);
+  } catch {
+    return false;
   }
 }
 

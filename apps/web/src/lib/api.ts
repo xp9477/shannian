@@ -13,7 +13,7 @@ export class ApiError extends Error {
   status: number;
   body: Record<string, unknown>;
   constructor(status: number, body: Record<string, unknown>) {
-    super(String(body.error || body.message || `HTTP_${status}`));
+    super(String(body.message || body.error || `HTTP_${status}`));
     this.status = status;
     this.body = body;
   }
@@ -43,10 +43,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   setupStatus: () => request<SetupStatus>("/api/setup/status"),
-  setupPassword: (password: string) =>
+  setupPassword: (password: string, setupToken?: string) =>
     request<{ ok: boolean }>("/api/setup/password", {
       method: "POST",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({
+        password,
+        ...(setupToken ? { setupToken } : {}),
+      }),
     }),
   setupAi: (data: { baseUrl: string; apiKey: string; model: string }) =>
     request("/api/setup/ai", { method: "POST", body: JSON.stringify(data) }),
@@ -164,9 +167,15 @@ export const api = {
       proxy: HttpProxySettingsPublic;
     }>("/api/settings"),
   saveAi: (data: { baseUrl: string; apiKey?: string; model: string }) =>
-    request("/api/settings/ai", { method: "PUT", body: JSON.stringify(data) }),
+    request<{ ai: AiSettingsPublic }>("/api/settings/ai", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
   saveMinio: (data: Record<string, string | undefined>) =>
-    request("/api/settings/minio", { method: "PUT", body: JSON.stringify(data) }),
+    request<{ minio: MinioSettingsPublic }>("/api/settings/minio", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
   saveProxy: (proxyUrl: string) =>
     request<{ proxy: HttpProxySettingsPublic }>("/api/settings/proxy", {
       method: "PUT",

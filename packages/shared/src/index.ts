@@ -111,6 +111,8 @@ export interface SetupStatus {
   initialized: boolean;
   hasAi: boolean;
   hasMinio: boolean;
+  /** Every first-run setup requires the one-time token printed in server logs. */
+  requiresSetupToken: boolean;
 }
 
 export interface AiSettingsPublic {
@@ -132,12 +134,13 @@ export interface MinioSettingsPublic {
 
 /** Outbound HTTP proxy (X / web fetch / AI etc.) */
 export interface HttpProxySettingsPublic {
-  /** Value stored in settings (empty if using env only) */
+  /** Safe editable URL; empty when the configured URL contains credentials. */
   proxyUrl: string;
-  /** Resolved proxy actually used, or null for direct */
+  /** Effective URL with any credentials redacted, or null for direct. */
   effectiveUrl: string | null;
   source: "settings" | "env" | "none";
   hasProxy: boolean;
+  hasCredentials: boolean;
 }
 
 export const DEFAULT_CATEGORIES = [

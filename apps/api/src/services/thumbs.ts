@@ -1,20 +1,28 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { getDataDir } from "../db/index.js";
+import { fetchPublicImage } from "../lib/public-fetch.js";
 
 const THUMBS_SUBDIR = "thumbs";
 
 export function getThumbsDir(): string {
   const dir = path.join(getDataDir(), THUMBS_SUBDIR);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(dir, 0o700);
+  } catch {
+    // Best effort for filesystems without POSIX permission support.
+  }
   return dir;
 }
 
 /** Object key stored in cards.thumbnail_key, e.g. thumbs/{cardId}.jpg */
-export function thumbKey(cardId: string, ext: string): string {
+export function thumbKey(cardId: string, ext: string, version?: string): string {
   const safeExt = ext.replace(/[^a-z0-9]/gi, "") || "jpg";
-  return `${THUMBS_SUBDIR}/${cardId}.${safeExt}`;
+  const safeVersion = version?.replace(/[^a-z0-9-]/gi, "") || "";
+  return `${THUMBS_SUBDIR}/${cardId}${safeVersion ? `.${safeVersion}` : ""}.${safeExt}`;
 }
 
 function resolveThumbPath(objectKey: string): string | null {
@@ -37,6 +45,7 @@ function extFromContentType(ct: string): string {
   if (ct.includes("png")) return "png";
   if (ct.includes("webp")) return "webp";
   if (ct.includes("gif")) return "gif";
+  if (ct.includes("avif")) return "avif";
   if (ct.includes("jpeg") || ct.includes("jpg")) return "jpg";
   return "jpg";
 }
@@ -46,6 +55,7 @@ export function contentTypeForKey(objectKey: string): string {
   if (ext === ".png") return "image/png";
   if (ext === ".webp") return "image/webp";
   if (ext === ".gif") return "image/gif";
+  if (ext === ".avif") return "image/avif";
   return "image/jpeg";
 }
 
@@ -57,31 +67,35 @@ export async function saveThumbnailFromUrl(
   cardId: string,
   imageUrl: string
 ): Promise<string | null> {
+  let temporaryPath: string | null = null;
   try {
-    const { outboundFetch } = await import("../lib/http.js");
-    const res = await outboundFetch(imageUrl, {
-      signal: AbortSignal.timeout(15000),
+    const res = await fetchPublicImage(imageUrl, {
+      timeoutMs: 15_000,
       headers: { "User-Agent": "ShannianBot/0.1" },
     });
     if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
+    const buf = res.body;
     if (buf.length < 32 || buf.length > 8 * 1024 * 1024) return null;
-    const ct = res.headers.get("content-type") || "image/jpeg";
-    if (!ct.startsWith("image/") && !ct.includes("octet-stream")) {
-      // still try if URL looks like an image path
-      if (!/\.(jpe?g|png|webp|gif)(\?|$)/i.test(imageUrl)) return null;
-    }
+    const ct = res.contentType || "image/jpeg";
     const ext = extFromContentType(ct);
-    const key = thumbKey(cardId, ext);
+    // Versioned names let the caller update SQLite first and delete the old
+    // object afterwards. A concurrent/stale enrichment can no longer overwrite
+    // the bytes referenced by the current database row.
+    const key = thumbKey(cardId, ext, randomUUID());
     const filePath = resolveThumbPath(key);
     if (!filePath) return null;
-    getThumbsDir();
-    // Remove any previous extension for this card
-    await deleteThumbnailsForCard(cardId);
-    await fsp.writeFile(filePath, buf);
+    const dir = getThumbsDir();
+    temporaryPath = path.join(dir, `.${cardId}.${randomUUID()}.tmp`);
+    await fsp.writeFile(temporaryPath, buf, { mode: 0o600, flag: "wx" });
+    // Rename is atomic on the local filesystem: a failed download/write never
+    // destroys the last known-good thumbnail.
+    await fsp.rename(temporaryPath, filePath);
+    temporaryPath = null;
     return key;
   } catch {
     return null;
+  } finally {
+    if (temporaryPath) await fsp.unlink(temporaryPath).catch(() => undefined);
   }
 }
 
@@ -100,7 +114,10 @@ export async function readThumbnail(objectKey: string): Promise<{
 }
 
 /** Delete all local thumb files for a card id (any extension). */
-export async function deleteThumbnailsForCard(cardId: string): Promise<void> {
+export async function deleteThumbnailsForCard(
+  cardId: string,
+  keepName?: string
+): Promise<void> {
   const dir = getThumbsDir();
   let names: string[];
   try {
@@ -111,7 +128,7 @@ export async function deleteThumbnailsForCard(cardId: string): Promise<void> {
   const prefix = `${cardId}.`;
   await Promise.all(
     names
-      .filter((n) => n.startsWith(prefix))
+      .filter((n) => n.startsWith(prefix) && n !== keepName)
       .map((n) => fsp.unlink(path.join(dir, n)).catch(() => undefined))
   );
 }

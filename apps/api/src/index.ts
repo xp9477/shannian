@@ -1,65 +1,49 @@
 import { serve } from "@hono/node-server";
-import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono } from "hono";
-import { cors } from "hono/cors";
-import { logger } from "hono/logger";
-import path from "node:path";
-import fs from "node:fs";
-import { fileURLToPath } from "node:url";
-import { initDb } from "./db/index.js";
-import { authRoutes } from "./routes/auth.js";
-import { setupRoutes } from "./routes/setup.js";
-import { cardsRoutes } from "./routes/cards.js";
-import { metaRoutes } from "./routes/meta.js";
-import { importRoutes } from "./routes/import.js";
-import { queueThumbnailBackfill } from "./services/cards.js";
+import { createApp } from "./app.js";
+import { initDb, sqlite } from "./db/index.js";
+import { announceSetupToken } from "./lib/setup-token.js";
+import { migrateSecretSettingsEncryption } from "./lib/settings.js";
+import { enrichCard } from "./services/cards.js";
+import {
+  startEnrichmentWorker,
+  stopEnrichmentWorker,
+} from "./services/enrichment-queue.js";
+import { recoverInterruptedXImport } from "./services/import/x-import-job.js";
 
 initDb();
-// Fill missing local covers / authors for existing cards (rate-limited, non-blocking)
-queueThumbnailBackfill();
+migrateSecretSettingsEncryption();
+const initialized = sqlite
+  .prepare("SELECT 1 FROM settings WHERE key = 'password_hash'")
+  .get();
+if (!initialized) {
+  announceSetupToken();
+}
+await recoverInterruptedXImport();
+startEnrichmentWorker(enrichCard);
 
-const app = new Hono();
+const app = createApp();
+const port = Number(process.env.PORT || 8787);
+const hostname = process.env.LISTEN_HOST?.trim() || "127.0.0.1";
+console.log(`闪念 API listening on http://${hostname}:${port}`);
+const server = serve({ fetch: app.fetch, port, hostname });
 
-app.use("*", logger());
-app.use(
-  "/api/*",
-  cors({
-    origin: (origin) => origin || "http://localhost:5173",
-    credentials: true,
-  })
-);
-
-app.get("/api/health", (c) => c.json({ ok: true, name: "闪念" }));
-
-app.route("/api/auth", authRoutes);
-app.route("/api/setup", setupRoutes);
-app.route("/api/cards", cardsRoutes);
-app.route("/api/import", importRoutes);
-app.route("/api", metaRoutes);
-
-// Serve web build in production
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const webDist = process.env.WEB_DIST || path.resolve(__dirname, "../../web/dist");
-if (fs.existsSync(webDist)) {
-  app.use(
-    "/*",
-    serveStatic({
-      root: webDist,
-      rewriteRequestPath: (p) => p,
-    })
-  );
-  app.get("*", async (c) => {
-    if (c.req.path.startsWith("/api")) {
-      return c.json({ error: "NOT_FOUND" }, 404);
-    }
-    const index = path.join(webDist, "index.html");
-    if (fs.existsSync(index)) {
-      return c.html(fs.readFileSync(index, "utf8"));
-    }
-    return c.text("Web UI not built", 404);
-  });
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal}: stop accepting new requests`);
+  const forceTimer = setTimeout(() => process.exit(1), 10_000);
+  forceTimer.unref();
+  const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+  await Promise.all([serverClosed, stopEnrichmentWorker(8_000)]);
+  try {
+    sqlite.pragma("wal_checkpoint(TRUNCATE)");
+    sqlite.close();
+  } finally {
+    clearTimeout(forceTimer);
+    process.exit(0);
+  }
 }
 
-const port = Number(process.env.PORT || 8787);
-console.log(`闪念 API listening on http://0.0.0.0:${port}`);
-serve({ fetch: app.fetch, port, hostname: "0.0.0.0" });
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));

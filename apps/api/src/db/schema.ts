@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const settings = sqliteTable("settings", {
@@ -27,12 +28,15 @@ export const cards = sqliteTable(
     urlNormalized: text("url_normalized"),
     platform: text("platform"),
     title: text("title"),
+    titleLocked: integer("title_locked").notNull().default(0),
     author: text("author"),
+    authorLocked: integer("author_locked").notNull().default(0),
     thumbnailKey: text("thumbnail_key"),
     /** JSON array of CardMediaItem */
     mediaJson: text("media_json"),
     note: text("note"),
     categoryId: text("category_id"),
+    categoryLocked: integer("category_locked").notNull().default(0),
     status: text("status").notNull().default("inbox"),
     fetchStatus: text("fetch_status").notNull().default("pending"),
     aiStatus: text("ai_status").notNull().default("pending"),
@@ -49,5 +53,9 @@ export const cards = sqliteTable(
     updatedAt: integer("updated_at").notNull(),
     deletedAt: integer("deleted_at"),
   },
-  (t) => [uniqueIndex("cards_url_normalized_unique").on(t.urlNormalized)]
+  (t) => [
+    uniqueIndex("cards_url_normalized_unique")
+      .on(t.urlNormalized)
+      .where(sql`${t.urlNormalized} is not null and ${t.deletedAt} is null`),
+  ]
 );

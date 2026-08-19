@@ -1,7 +1,7 @@
 # 平台导入（先 X Bookmarks）
 
 > 状态：已与产品方达成共享理解并确认（2026-08-03）  
-> 相对 v1：主路径从「粘贴」调整为「平台导入」；粘贴降为副路径。
+> 相对 v1 的目标：主路径从「粘贴」调整为「平台导入」；当前仅 X 可用，其他平台仍是规划。
 
 ## 1. 产品一句话
 
@@ -11,18 +11,18 @@
 
 | # | 决策 |
 |---|------|
-| 1 | 主路径 = 多平台导入；粘贴 = 副路径 |
+| 1 | 目标主路径 = 多平台导入；当前主路径 = X 导入，粘贴 = 副路径 |
 | 2 | IA：主壳「库 \| 导入 \| 回收站 \| 设置」；导入页 = 平台卡片列表 |
 | 3 | Connector：导入必选，写回可选 |
 | 4 | 仅 X **Bookmarks**（不做 Likes） |
 | 5 | 手动导入 + 后台 job + 进度；同时仅一个导入任务 |
-| 6 | 增量：首次全量；之后从新到旧，碰到已有 `tweet_id`（已认领）即停（A1）；可强制全量 |
+| 6 | 增量：首次全量；之后从新到旧，完整一页均无新建/认领时停止；可强制全量 |
 | 7 | 已存在 URL：不改内容，补 `import_source` + `external_id` |
-| 8 | 新卡 inbox；与粘贴相同，每条异步 AI |
+| 8 | 新卡 inbox；媒体和正文随时间线一次入库；AI 进入 SQLite 持久队列 |
 | 9 | 仅 `import_source=x_bookmark` 在**永久删除**时 unbookmark；进回收站不碰 X |
-| 10 | 写回失败：先尝试 → 弹窗 → 仍删除 / 取消 |
+| 10 | 当前写回失败：同步尝试 → 弹窗 → 强制本地删除 / 取消；尚非 durable、延迟或可撤销 delivery |
 | 11 | 恢复回收站不重新 bookmark |
-| 12 | 凭证：`auth_token` + 必要时 `ct0`，存 settings（脱敏回显），可清除 |
+| 12 | 凭证：`auth_token` + 必要时 `ct0`，存 settings（脱敏回显），可清除；可用外部 key 加密 |
 | 13 | 非官方 Cookie 方案；极保守限速；残留封号风险自担，不承诺零封号 |
 | 14 | 不做：官方付费 API、常驻自动同步、Likes、扩展、soft-delete 写回 |
 
@@ -72,7 +72,7 @@ interface PlatformConnector {
 }
 ```
 
-### 4.3 ImportJob（settings JSON 或内存 + 落库）
+### 4.3 ImportJob（settings JSON 状态 + 单进程执行）
 
 ```ts
 {
@@ -81,6 +81,8 @@ interface PlatformConnector {
   error?, message?, createdAt, updatedAt
 }
 ```
+
+服务重启时，残留的 `running` 会转成 `failed/IMPORT_INTERRUPTED`，不会永久假装运行；当前版本尚未持久化分页 cursor，因此需要用户重新开始。卡片解析/AI 使用独立的 SQLite `enrichment_jobs`，可以在重启后恢复。
 
 ## 5. X 实现要点
 
@@ -94,10 +96,10 @@ interface PlatformConnector {
 
 1. 校验凭证（如 verify credentials / 拉一页书签）。
 2. 从新到旧分页拉 Bookmarks。
-3. 每条：规范化 URL → 已存在则 claim 字段；否则建卡 inbox + `queueEnrichment`。
-4. 非 `forceFull`：命中已认领 `external_id` **立即停**（A1）。
-5. 页间 sleep（默认 ~1.5–2.5s，可配置）；429 指数退避。
-6. 同时仅一个 X 导入 job。
+3. 每条：规范化 URL → 已存在则 claim 字段；否则把时间线已有正文/媒体建卡 inbox，并写入 durable enrichment job。
+4. 非 `forceFull`：只有完整一页均为已存在/跳过才停止，避免上次在页中途中断后漏掉后半页。
+5. 页间 sleep（默认 ~2.0–2.8s，配置会被夹在 0.5–60s）；429 指数退避。
+6. 同时仅一个 X 导入 job；同步互斥在第一次 `await` 前抢占，避免并发启动。
 
 ### 5.3 写回
 

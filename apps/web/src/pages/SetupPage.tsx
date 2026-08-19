@@ -1,11 +1,19 @@
 import { useState } from "react";
+import type { SetupStatus } from "@shannian/shared";
 import { toast } from "sonner";
 import { api } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 
-export default function SetupPage({ onDone }: { onDone: () => void }) {
+export default function SetupPage({
+  status,
+  onDone,
+}: {
+  status: SetupStatus;
+  onDone: () => void;
+}) {
   const [step, setStep] = useState(1);
+  const [setupToken, setSetupToken] = useState("");
   const [password, setPassword] = useState("");
   const [password2, setPassword2] = useState("");
   const [ai, setAi] = useState({ baseUrl: "", apiKey: "", model: "" });
@@ -41,8 +49,32 @@ export default function SetupPage({ onDone }: { onDone: () => void }) {
         {step === 1 && (
           <div className="space-y-3">
             <p className="text-sm text-[var(--color-muted-foreground)]">
-              创建主人密码。公网访问时这是唯一门锁。
+              创建主人密码。请使用高强度、仅自己掌握的密码。
             </p>
+            {status.requiresSetupToken && (
+              <div className="rounded-xl border border-amber-300/70 bg-amber-50/80 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
+                <p className="font-medium">这台服务器已启用首次初始化保护</p>
+                <p className="mt-1 leading-relaxed opacity-80">
+                  请向部署者获取初始化令牌。若未在环境变量中显式设置令牌，可在部署主机的容器日志中找到：
+                </p>
+                <code className="mt-2 block overflow-x-auto rounded-lg bg-black/5 px-2.5 py-2 font-mono text-xs dark:bg-white/10">
+                  docker logs shannian 2&gt;&amp;1 | grep 首次初始化令牌
+                </code>
+                <p className="mt-2 text-xs leading-relaxed opacity-70">
+                  通过环境变量配置的令牌会持续有效到完成初始化；自动生成的令牌只在当前容器启动期间有效。
+                </p>
+              </div>
+            )}
+            {status.requiresSetupToken && (
+              <Input
+                type="password"
+                autoComplete="one-time-code"
+                spellCheck={false}
+                placeholder="一次性初始化令牌"
+                value={setupToken}
+                onChange={(e) => setSetupToken(e.target.value)}
+              />
+            )}
             <Input
               type="password"
               placeholder="密码（至少 8 位）"
@@ -57,13 +89,16 @@ export default function SetupPage({ onDone }: { onDone: () => void }) {
             />
             <Button
               className="w-full"
-              disabled={loading}
+              disabled={loading || (status.requiresSetupToken && !setupToken.trim())}
               onClick={async () => {
                 if (password.length < 8) return toast.error("密码至少 8 位");
                 if (password !== password2) return toast.error("两次密码不一致");
+                if (status.requiresSetupToken && !setupToken.trim()) {
+                  return toast.error("请输入容器日志中的一次性令牌");
+                }
                 setLoading(true);
                 try {
-                  await api.setupPassword(password);
+                  await api.setupPassword(password, setupToken.trim() || undefined);
                   setStep(2);
                 } catch (e) {
                   toast.error(e instanceof Error ? e.message : "失败");
@@ -88,6 +123,9 @@ export default function SetupPage({ onDone }: { onDone: () => void }) {
               onChange={(e) => setAi({ ...ai, baseUrl: e.target.value })}
             />
             <Input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
               placeholder="API Key"
               value={ai.apiKey}
               onChange={(e) => setAi({ ...ai, apiKey: e.target.value })}
@@ -107,6 +145,8 @@ export default function SetupPage({ onDone }: { onDone: () => void }) {
                   try {
                     await api.skipAi();
                     setStep(3);
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : "跳过 AI 设置失败");
                   } finally {
                     setLoading(false);
                   }
@@ -176,6 +216,8 @@ export default function SetupPage({ onDone }: { onDone: () => void }) {
                   try {
                     await api.skipMinio();
                     onDone();
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : "跳过 MinIO 设置失败");
                   } finally {
                     setLoading(false);
                   }

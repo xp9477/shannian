@@ -13,7 +13,10 @@ import { getXCredentials, getXQueryIds } from "./x-credentials.js";
 const JOB_KEY = "import_job_x";
 
 /** Conservative defaults — prefer not getting rate-limited / flagged */
-const PAGE_DELAY_MS = Number(process.env.X_IMPORT_PAGE_DELAY_MS || 2000);
+const configuredPageDelay = Number(process.env.X_IMPORT_PAGE_DELAY_MS || 2000);
+const PAGE_DELAY_MS = Number.isFinite(configuredPageDelay)
+  ? Math.max(500, Math.min(Math.floor(configuredPageDelay), 60_000))
+  : 2_000;
 const PAGE_SIZE = 20;
 
 let cancelRequested = false;
@@ -42,6 +45,20 @@ export async function getXImportJob(): Promise<ImportJob | null> {
   return loadJob();
 }
 
+/**
+ * An import executes inside this process, so a persisted `running` state cannot
+ * still be valid after a restart. Make the interruption explicit instead of
+ * leaving the UI polling a job that no worker can ever finish.
+ */
+export async function recoverInterruptedXImport(): Promise<void> {
+  const job = await loadJob();
+  if (!job || job.status !== "running") return;
+  job.status = "failed";
+  job.error = "IMPORT_INTERRUPTED";
+  job.message = "服务重启中断了导入，请重新开始";
+  await saveJob(job);
+}
+
 export async function cancelXImport(): Promise<ImportJob | null> {
   cancelRequested = true;
   const job = await loadJob();
@@ -54,15 +71,19 @@ export async function cancelXImport(): Promise<ImportJob | null> {
 }
 
 export async function startXImport(opts: { forceFull?: boolean } = {}): Promise<ImportJob> {
-  if (running) {
-    const existing = await loadJob();
-    if (existing?.status === "running") {
-      throw new Error("IMPORT_ALREADY_RUNNING");
-    }
-  }
+  // Claim synchronously before the first await so two HTTP requests in the same
+  // event-loop turn cannot both start an import.
+  if (running) throw new Error("IMPORT_ALREADY_RUNNING");
+  running = true;
 
-  const creds = await getXCredentials();
-  if (!creds) throw new Error("X_CREDENTIALS_MISSING");
+  const creds = await getXCredentials().catch((error) => {
+    running = false;
+    throw error;
+  });
+  if (!creds) {
+    running = false;
+    throw new Error("X_CREDENTIALS_MISSING");
+  }
 
   cancelRequested = false;
   const job: ImportJob = {
@@ -79,22 +100,31 @@ export async function startXImport(opts: { forceFull?: boolean } = {}): Promise<
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
-  await saveJob(job);
-
-  running = true;
+  try {
+    await saveJob(job);
+  } catch (error) {
+    running = false;
+    throw error;
+  }
   setImmediate(() => {
-    runImport(job.id).catch(async (e) => {
-      console.error("[x-import] failed", e instanceof Error ? e.message : e);
-      const j = await loadJob();
-      if (j && j.id === job.id && j.status === "running") {
-        j.status = "failed";
-        j.error = e instanceof Error ? e.message : String(e);
-        j.message = "导入失败";
-        await saveJob(j);
-      }
-    }).finally(() => {
-      running = false;
-    });
+    void runImport(job.id)
+      .catch(async (e) => {
+        console.error("[x-import] failed", e instanceof Error ? e.message : e);
+        try {
+          const j = await loadJob();
+          if (j && j.id === job.id && j.status === "running") {
+            j.status = "failed";
+            j.error = e instanceof Error ? e.message : String(e);
+            j.message = "导入失败";
+            await saveJob(j);
+          }
+        } catch (persistError) {
+          console.error("[x-import] could not persist failure", persistError);
+        }
+      })
+      .finally(() => {
+        running = false;
+      });
   });
 
   return job;
@@ -147,7 +177,7 @@ async function runImport(jobId: string): Promise<void> {
     }
 
     page += 1;
-    let stopIncremental = false;
+    let pageChanged = false;
 
     for (const item of pageResult.items) {
       if (cancelRequested) break;
@@ -167,21 +197,18 @@ async function runImport(jobId: string): Promise<void> {
         title: text,
         author,
         description: text,
+        media: item.media,
         raw: item.raw,
       });
 
-      if (result === "imported") j.imported += 1;
-      else if (result === "claimed") j.claimed += 1;
-      else if (result === "already") j.skipped += 1;
+      if (result === "imported") {
+        j.imported += 1;
+        pageChanged = true;
+      } else if (result === "claimed") {
+        j.claimed += 1;
+        pageChanged = true;
+      } else if (result === "already") j.skipped += 1;
       else j.skipped += 1;
-
-      // A1: incremental — stop at first already-claimed bookmark (newest-first)
-      if (!j.forceFull && result === "already") {
-        stopIncremental = true;
-        j.message = `增量完成：遇到已导入书签，停于第 ${j.scanned} 条`;
-        await saveJob(j);
-        break;
-      }
 
       j.message = `已扫描 ${j.scanned} · 新建 ${j.imported} · 认领 ${j.claimed}`;
       await saveJob(j);
@@ -197,13 +224,14 @@ async function runImport(jobId: string): Promise<void> {
       return;
     }
 
-    if (stopIncremental) {
+    // Stop only after a complete page contains no new/claimed item. Stopping
+    // at the first duplicate loses the rest of a partly committed page after
+    // a crash or cancellation.
+    if (!j.forceFull && !pageChanged) {
       j = (await loadJob())!;
       if (j.id === jobId) {
         j.status = "completed";
-        if (!j.message?.includes("增量")) {
-          j.message = `完成：新建 ${j.imported}，认领 ${j.claimed}，跳过 ${j.skipped}`;
-        }
+        j.message = `增量完成：本页无新书签；新建 ${j.imported}，认领 ${j.claimed}，跳过 ${j.skipped}`;
         await saveJob(j);
       }
       return;
