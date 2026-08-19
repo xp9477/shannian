@@ -28,7 +28,7 @@ test("first run, capture, keep, edit, global search, and export error", async ({
   await page.getByRole("button", { name: "跳过", exact: true }).click();
   await expect(page.getByText("步骤 3 / 3", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "跳过，进入", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "收件箱", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^收件箱/ })).toBeVisible();
 
   const originalTitle = "浏览器闭环测试 惟一短语 可恢复";
   const capture = page.getByPlaceholder("粘贴链接或写下想法… Enter 保存");
@@ -56,8 +56,12 @@ test("first run, capture, keep, edit, global search, and export error", async ({
 
   // Leave the organized card, open the inbox, then prove keyword search
   // deliberately crosses the current status filter.
-  await page.getByRole("button", { name: /收件箱/ }).first().click();
-  await expect(page.getByRole("heading", { name: "收件箱", exact: true })).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "主导航" })
+    .getByRole("button", { name: /^收件箱/ })
+    .click();
+  await expect(page).toHaveURL(/\?status=inbox$/);
+  await expect(page.getByRole("heading", { name: /^收件箱/ })).toBeVisible();
   await expect(page.getByText("浏览器闭环编辑稳定", { exact: true })).toHaveCount(0);
   await page.getByPlaceholder("搜索标题、摘要、想法…").fill("浏览器闭环编辑稳定");
   await expect(page.getByText("浏览器闭环编辑稳定", { exact: true })).toBeVisible();

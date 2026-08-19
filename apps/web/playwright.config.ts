@@ -9,7 +9,10 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
   workers: 1,
-  retries: process.env.CI ? 1 : 0,
+  // This smoke deliberately validates a fresh first-run database. Retrying
+  // against the same webServer would instead land on login and mask the real
+  // failure with state left by the first attempt.
+  retries: 0,
   timeout: 30_000,
   expect: { timeout: 8_000 },
   use: {
