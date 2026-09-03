@@ -12,6 +12,7 @@ import {
   getXImportJob,
   startXImport,
 } from "../services/import/x-import-job.js";
+import { settingValueSchema } from "../lib/validation.js";
 
 export const importRoutes = new Hono<AuthEnv>();
 importRoutes.use("*", requireAuth);
@@ -30,9 +31,9 @@ importRoutes.get("/x/credentials", async (c) => {
 importRoutes.put("/x/credentials", async (c) => {
   const body = z
     .object({
-      authToken: z.string().optional(),
-      ct0: z.string().optional(),
-    })
+      authToken: settingValueSchema.optional(),
+      ct0: settingValueSchema.optional(),
+    }).strict()
     .parse(await c.req.json());
   if (!body.authToken?.trim() && !body.ct0?.trim()) {
     return c.json({ error: "EMPTY" }, 400);
@@ -53,6 +54,7 @@ importRoutes.post("/x/test", async (c) => {
 importRoutes.post("/x/start", async (c) => {
   const body = z
     .object({ forceFull: z.boolean().optional() })
+    .strict()
     .parse((await c.req.json().catch(() => ({}))) || {});
   try {
     const job = await startXImport({ forceFull: body.forceFull });

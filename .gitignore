@@ -1,6 +1,7 @@
 node_modules
 dist
-data
+data/*
+!data/.gitkeep
 *.db
 *.db-*
 .env
@@ -11,3 +12,5 @@ apps/api/dist
 packages/shared/dist
 *.log
 .vite
+**/test-results
+**/playwright-report

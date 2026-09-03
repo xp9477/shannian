@@ -1,5 +1,9 @@
 import type { XCredentialsPublic } from "@shannian/shared";
-import { deleteSetting, getSetting, setSetting } from "../../lib/settings.js";
+import {
+  deleteSettings,
+  getSettings,
+  setSettings,
+} from "../../lib/settings.js";
 import { maskSecret } from "../../lib/crypto.js";
 import type { XCredentials } from "./x-client.js";
 
@@ -10,15 +14,17 @@ const KEY_DELETE_QID = "x_delete_bookmark_query_id";
 const KEY_TWEET_QID = "x_tweet_result_query_id";
 
 export async function getXCredentials(): Promise<XCredentials | null> {
-  const authToken = await getSetting(KEY_AUTH);
-  const ct0 = await getSetting(KEY_CT0);
+  const values = await getSettings([KEY_AUTH, KEY_CT0]);
+  const authToken = values[KEY_AUTH];
+  const ct0 = values[KEY_CT0];
   if (!authToken || !ct0) return null;
   return { authToken, ct0 };
 }
 
 export async function getXCredentialsPublic(): Promise<XCredentialsPublic> {
-  const authToken = await getSetting(KEY_AUTH);
-  const ct0 = await getSetting(KEY_CT0);
+  const values = await getSettings([KEY_AUTH, KEY_CT0]);
+  const authToken = values[KEY_AUTH];
+  const ct0 = values[KEY_CT0];
   return {
     hasAuthToken: Boolean(authToken),
     hasCt0: Boolean(ct0),
@@ -31,18 +37,15 @@ export async function saveXCredentials(input: {
   authToken?: string;
   ct0?: string;
 }): Promise<XCredentialsPublic> {
-  if (input.authToken?.trim()) {
-    await setSetting(KEY_AUTH, input.authToken.trim());
-  }
-  if (input.ct0?.trim()) {
-    await setSetting(KEY_CT0, input.ct0.trim());
-  }
+  await setSettings({
+    [KEY_AUTH]: input.authToken?.trim() || undefined,
+    [KEY_CT0]: input.ct0?.trim() || undefined,
+  });
   return getXCredentialsPublic();
 }
 
 export async function clearXCredentials(): Promise<void> {
-  await deleteSetting(KEY_AUTH);
-  await deleteSetting(KEY_CT0);
+  await deleteSettings([KEY_AUTH, KEY_CT0]);
 }
 
 export async function getXQueryIds(): Promise<{
@@ -50,9 +53,14 @@ export async function getXQueryIds(): Promise<{
   delete: string | null;
   tweet: string | null;
 }> {
+  const values = await getSettings([
+    KEY_BOOKMARKS_QID,
+    KEY_DELETE_QID,
+    KEY_TWEET_QID,
+  ]);
   return {
-    bookmarks: await getSetting(KEY_BOOKMARKS_QID),
-    delete: await getSetting(KEY_DELETE_QID),
-    tweet: await getSetting(KEY_TWEET_QID),
+    bookmarks: values[KEY_BOOKMARKS_QID],
+    delete: values[KEY_DELETE_QID],
+    tweet: values[KEY_TWEET_QID],
   };
 }

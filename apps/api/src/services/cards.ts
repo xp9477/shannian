@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import type {
   AiStatus,
@@ -12,7 +12,12 @@ import type {
 } from "@shannian/shared";
 import { db, sqlite } from "../db/index.js";
 import { cards, categories } from "../db/schema.js";
-import { detectPlatform, extractFirstUrl, normalizeUrl } from "../lib/url.js";
+import {
+  detectPlatform,
+  extractFirstUrl,
+  normalizeUrl,
+  parseHttpUrl,
+} from "../lib/url.js";
 import { fetchUrlMeta } from "./adapters/index.js";
 import { suggestForCard } from "./ai.js";
 import { getAiConfig, getMinioConfig } from "../lib/settings.js";
@@ -28,29 +33,90 @@ import {
   placeholderTitleFromText,
   titleFromAi,
 } from "./title.js";
+import { enqueueEnrichmentJob } from "./enrichment-queue.js";
+import { AppError } from "../lib/errors.js";
 
 function now() {
   return Date.now();
 }
 
-function ftsSync(cardId: string, fields: {
-  title?: string | null;
-  note?: string | null;
-  author?: string | null;
-  url?: string | null;
-}) {
-  sqlite.prepare("DELETE FROM cards_fts WHERE card_id = ?").run(cardId);
-  sqlite
-    .prepare(
-      "INSERT INTO cards_fts (card_id, title, note, author, url) VALUES (?, ?, ?, ?, ?)"
-    )
-    .run(
-      cardId,
-      fields.title || "",
-      fields.note || "",
-      fields.author || "",
-      fields.url || ""
-    );
+function fetchErrorFromRaw(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  if (typeof record.fetchError === "string") return record.fetchError;
+  return fetchErrorFromRaw(record.web);
+}
+
+function isBareHostnameTitle(title: string | null | undefined, url: string): boolean {
+  if (!title) return false;
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+    return title.trim().replace(/^www\./i, "").toLowerCase() === hostname;
+  } catch {
+    return false;
+  }
+}
+
+function serializeRawMeta(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized.length <= 100_000) return serialized;
+    return JSON.stringify({
+      truncated: true,
+      originalChars: serialized.length,
+      preview: serialized.slice(0, 20_000),
+    });
+  } catch (error) {
+    return JSON.stringify({ serializationError: String(error) });
+  }
+}
+
+function sameAiEvidence(
+  left: typeof cards.$inferSelect,
+  right: typeof cards.$inferSelect
+): boolean {
+  return (
+    left.url === right.url &&
+    left.title === right.title &&
+    left.author === right.author &&
+    left.note === right.note &&
+    left.description === right.description &&
+    left.contentExcerpt === right.contentExcerpt &&
+    left.summary === right.summary
+  );
+}
+
+const MAX_STORED_NOTE_CHARS = 100_000;
+
+function appendNoteTransaction(
+  cardId: string,
+  addition: string,
+  stampWhenEmpty: boolean
+): boolean {
+  const append = sqlite.transaction(() => {
+    const existing = sqlite
+      .prepare("SELECT note FROM cards WHERE id = ? AND deleted_at IS NULL")
+      .get(cardId) as { note: string | null } | undefined;
+    if (!existing) return false;
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const next = existing.note
+      ? `${existing.note}\n\n---\n[${stamp} 追加]\n${addition}`
+      : stampWhenEmpty
+        ? `[${stamp} 追加]\n${addition}`
+        : addition;
+    if (next.length > MAX_STORED_NOTE_CHARS) {
+      throw new AppError(
+        "NOTE_TOO_LARGE",
+        413,
+        `累计笔记不能超过 ${MAX_STORED_NOTE_CHARS} 字符`
+      );
+    }
+    sqlite
+      .prepare("UPDATE cards SET note = ?, updated_at = ? WHERE id = ?")
+      .run(next, now(), cardId);
+    return true;
+  });
+  return append();
 }
 
 function parseMediaJson(raw: string | null | undefined): CardMediaItem[] {
@@ -58,28 +124,66 @@ function parseMediaJson(raw: string | null | undefined): CardMediaItem[] {
   try {
     const arr = JSON.parse(raw) as unknown;
     if (!Array.isArray(arr)) return [];
-    return arr
-      .filter(
-        (m): m is CardMediaItem =>
-          Boolean(m && typeof m === "object" && typeof (m as CardMediaItem).url === "string")
-      )
-      .map((m) => ({
-        type: m.type === "video" || m.type === "gif" ? m.type : "image",
-        url: m.url,
-        posterUrl: m.posterUrl ?? null,
-        width: m.width ?? null,
-        height: m.height ?? null,
-      }));
+    return arr.flatMap((value): CardMediaItem[] => {
+      if (!value || typeof value !== "object") return [];
+      const media = value as Partial<CardMediaItem>;
+      const url = safeRemoteMediaUrl(media.url);
+      if (!url) return [];
+      return [
+        {
+          type: media.type === "video" || media.type === "gif" ? media.type : "image",
+          url,
+          posterUrl: safeRemoteMediaUrl(media.posterUrl) ?? null,
+          width: safeMediaDimension(media.width),
+          height: safeMediaDimension(media.height),
+        },
+      ];
+    });
   } catch {
     return [];
   }
 }
 
-export async function toFlashCard(row: typeof cards.$inferSelect): Promise<FlashCard> {
+function safeRemoteMediaUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 4_096) return null;
+  try {
+    const parsed = new URL(value);
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      !parsed.hostname ||
+      parsed.username ||
+      parsed.password
+    ) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function safeMediaDimension(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.min(Math.floor(value), 100_000)
+    : null;
+}
+
+export async function toFlashCard(
+  row: typeof cards.$inferSelect,
+  categoryNames?: ReadonlyMap<string, string>
+): Promise<FlashCard> {
   let categoryName: string | null = null;
   if (row.categoryId) {
-    const cat = await db.select().from(categories).where(eq(categories.id, row.categoryId)).get();
-    categoryName = cat?.name ?? null;
+    if (categoryNames) {
+      categoryName = categoryNames.get(row.categoryId) ?? null;
+    } else {
+      const cat = await db
+        .select()
+        .from(categories)
+        .where(eq(categories.id, row.categoryId))
+        .get();
+      categoryName = cat?.name ?? null;
+    }
   }
   const media = parseMediaJson(row.mediaJson);
   return {
@@ -118,17 +222,6 @@ export async function toFlashCard(row: typeof cards.$inferSelect): Promise<Flash
   };
 }
 
-async function refreshFts(cardId: string) {
-  const row = await db.select().from(cards).where(eq(cards.id, cardId)).get();
-  if (!row) return;
-  ftsSync(cardId, {
-    title: row.title,
-    note: row.note,
-    author: row.author,
-    url: row.url,
-  });
-}
-
 export async function createCard(input: {
   text?: string;
   url?: string | null;
@@ -148,6 +241,7 @@ export async function createCard(input: {
   }
 
   url = url?.trim() || null;
+  if (url) url = parseHttpUrl(url);
   note = note?.trim() || null;
   if (!url && !note) {
     throw new Error("EMPTY_CARD");
@@ -163,15 +257,7 @@ export async function createCard(input: {
       .get();
     if (existing) {
       if (note) {
-        const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-        const appended = existing.note
-          ? `${existing.note}\n\n---\n[${stamp} 追加]\n${note}`
-          : `[${stamp} 追加]\n${note}`;
-        await db
-          .update(cards)
-          .set({ note: appended, updatedAt: now() })
-          .where(eq(cards.id, existing.id));
-        await refreshFts(existing.id);
+        appendNoteTransaction(existing.id, note, true);
       }
       const updated = await db.select().from(cards).where(eq(cards.id, existing.id)).get();
       return { card: await toFlashCard(updated!), existing: true };
@@ -189,36 +275,49 @@ export async function createCard(input: {
       ? placeholderTitleFromText(note) || note.slice(0, 28)
       : null;
 
-  await db.insert(cards).values({
-    id,
-    url,
-    urlNormalized,
-    platform,
-    title: pureThoughtTitle,
-    author: null,
-    thumbnailKey: null,
-    mediaJson: null,
-    note,
-    categoryId: null,
-    status: "inbox",
-    fetchStatus: url ? "pending" : "skipped",
-    aiStatus: hasAi ? "pending" : "skipped",
-    summary: null,
-    description: null,
-    // Pure thoughts: feed note to AI for category only (title locked in enrich)
-    contentExcerpt: !url && note ? note.slice(0, 6000) : null,
-    summaryBasis: null,
-    rawMeta: null,
-    importSource: null,
-    externalId: null,
-    depositedAt: null,
-    depositedObjectKey: null,
-    createdAt: ts,
-    updatedAt: ts,
-    deletedAt: null,
-  });
+  try {
+    await db.insert(cards).values({
+      id,
+      url,
+      urlNormalized,
+      platform,
+      title: pureThoughtTitle,
+      author: null,
+      thumbnailKey: null,
+      mediaJson: null,
+      note,
+      categoryId: null,
+      status: "inbox",
+      fetchStatus: url ? "pending" : "skipped",
+      aiStatus: hasAi ? "pending" : "skipped",
+      summary: null,
+      description: null,
+      // Pure thoughts: feed note to AI for category only (title locked in enrich)
+      contentExcerpt: !url && note ? note.slice(0, 6000) : null,
+      summaryBasis: null,
+      rawMeta: null,
+      importSource: null,
+      externalId: null,
+      depositedAt: null,
+      depositedObjectKey: null,
+      createdAt: ts,
+      updatedAt: ts,
+      deletedAt: null,
+    });
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (!urlNormalized || !code?.startsWith("SQLITE_CONSTRAINT")) throw error;
+    const raced = await db
+      .select()
+      .from(cards)
+      .where(and(eq(cards.urlNormalized, urlNormalized), isNull(cards.deletedAt)))
+      .get();
+    if (!raced) throw error;
+    if (note) appendNoteTransaction(raced.id, note, true);
+    const latest = await db.select().from(cards).where(eq(cards.id, raced.id)).get();
+    return { card: await toFlashCard(latest!), existing: true };
+  }
 
-  await refreshFts(id);
   const row = await db.select().from(cards).where(eq(cards.id, id)).get();
   const card = await toFlashCard(row!);
 
@@ -228,8 +327,6 @@ export async function createCard(input: {
   return { card, existing: false };
 }
 
-const enriching = new Set<string>();
-
 export async function markEnrichPending(cardId: string) {
   await db
     .update(cards)
@@ -238,96 +335,138 @@ export async function markEnrichPending(cardId: string) {
 }
 
 export function queueEnrichment(cardId: string, opts?: { force?: boolean }) {
-  if (enriching.has(cardId)) return;
-  enriching.add(cardId);
-  setImmediate(() => {
-    enrichCard(cardId, opts)
-      .catch((e) => console.error("enrich failed", cardId, e))
-      .finally(() => enriching.delete(cardId));
-  });
+  enqueueEnrichmentJob(cardId, opts);
 }
 
 export async function enrichCard(cardId: string, opts?: { force?: boolean }) {
   const force = Boolean(opts?.force);
   const row = await db.select().from(cards).where(eq(cards.id, cardId)).get();
   if (!row || row.deletedAt) return;
+  let fetchFailure: unknown = null;
 
   const shouldFetch = Boolean(row.url) && (force || row.fetchStatus !== "ok");
 
   if (shouldFetch && row.url) {
+    const sourceUrl = row.url;
+    let newThumbnailKey: string | null = null;
     try {
-      const meta = await fetchUrlMeta(row.url);
-      let thumbnailKey = row.thumbnailKey;
+      const meta = await fetchUrlMeta(sourceUrl);
+      let current = await db.select().from(cards).where(eq(cards.id, cardId)).get();
+      if (!current || current.deletedAt) return;
+      if (current.url !== sourceUrl) {
+        queueEnrichment(cardId, { force });
+        return;
+      }
+      let thumbnailKey = current.thumbnailKey;
       if (meta.thumbnailUrl) {
         const key = await saveThumbnailFromUrl(cardId, meta.thumbnailUrl);
-        if (key) thumbnailKey = key;
+        if (key) {
+          newThumbnailKey = key;
+          thumbnailKey = key;
+        }
+      }
+      current = await db.select().from(cards).where(eq(cards.id, cardId)).get();
+      if (!current || current.deletedAt || current.url !== sourceUrl) {
+        if (newThumbnailKey) await deleteThumbnailByKey(newThumbnailKey);
+        if (current && !current.deletedAt) queueEnrichment(cardId, { force });
+        return;
       }
       // Platform/og titles are weak; prefer body head as temp placeholder until AI 精炼标题
       const bodyForTitle =
         meta.contentExcerpt?.trim() ||
         meta.description?.trim() ||
-        (meta.title && !isShellTitle(meta.title) ? meta.title : null) ||
+        (meta.title &&
+        !isShellTitle(meta.title) &&
+        !isBareHostnameTitle(meta.title, sourceUrl)
+          ? meta.title
+          : null) ||
         null;
       const nextTitle = mergeTitle({
-        existing: row.title,
+        existing: current.title,
         incoming: null,
         ruleFromBody: bodyForTitle,
         force,
       });
-      const nextAuthor = mergeAuthor({
-        existing: row.author,
-        incoming: meta.author,
-        force,
-      });
+      const protectedTitle = current.titleLocked ? current.title : nextTitle;
+      const nextAuthor = current.authorLocked
+        ? current.author
+        : mergeAuthor({
+            existing: current.author,
+            incoming: meta.author,
+            force,
+          });
       const nextDescription =
-        meta.description ?? (force ? null : row.description);
+        meta.description ?? (force ? null : current.description);
       const nextExcerpt =
-        meta.contentExcerpt ?? (force ? null : row.contentExcerpt);
+        meta.contentExcerpt ?? (force ? null : current.contentExcerpt);
       const nextMedia =
         meta.media && meta.media.length
           ? JSON.stringify(meta.media)
           : force
             ? null
-            : row.mediaJson;
-      const hasCore = Boolean(
-        (nextTitle && !isShellTitle(nextTitle)) ||
-          nextDescription?.trim() ||
-          nextExcerpt?.trim() ||
+            : current.mediaJson;
+      const hasFetchedCore = Boolean(
+        bodyForTitle ||
+          meta.description?.trim() ||
+          meta.contentExcerpt?.trim() ||
           (meta.media && meta.media.length)
       );
-      await db
+      const updated = await db
         .update(cards)
         .set({
           platform: meta.platform,
-          title: nextTitle,
+          title: protectedTitle,
           author: nextAuthor,
           thumbnailKey,
           mediaJson: nextMedia,
           description: nextDescription,
           contentExcerpt: nextExcerpt,
-          fetchStatus: hasCore
+          fetchStatus: hasFetchedCore
             ? nextAuthor || thumbnailKey || nextDescription || nextMedia
               ? "ok"
               : "partial"
             : "partial",
-          rawMeta: JSON.stringify(meta.raw ?? meta),
+          rawMeta: serializeRawMeta(meta.raw ?? meta),
           updatedAt: now(),
         })
-        .where(eq(cards.id, cardId));
+        .where(
+          and(
+            eq(cards.id, cardId),
+            eq(cards.url, sourceUrl),
+            eq(cards.updatedAt, current.updatedAt),
+            isNull(cards.deletedAt)
+          )
+        );
+      if (updated.changes !== 1) {
+        if (newThumbnailKey) await deleteThumbnailByKey(newThumbnailKey);
+        queueEnrichment(cardId, { force });
+        return;
+      }
+      if (
+        newThumbnailKey &&
+        current.thumbnailKey &&
+        current.thumbnailKey !== newThumbnailKey
+      ) {
+        await deleteThumbnailByKey(current.thumbnailKey);
+      }
+      const reportedError = fetchErrorFromRaw(meta.raw);
+      if (reportedError) fetchFailure = new Error(reportedError);
     } catch (e) {
+      fetchFailure = e;
+      if (newThumbnailKey) await deleteThumbnailByKey(newThumbnailKey);
       await db
         .update(cards)
         .set({
           fetchStatus: "failed",
-          rawMeta: JSON.stringify({ error: String(e) }),
+          rawMeta: serializeRawMeta({ error: String(e) }),
           updatedAt: now(),
         })
-        .where(eq(cards.id, cardId));
+        .where(and(eq(cards.id, cardId), eq(cards.url, sourceUrl)));
     }
   }
 
   const afterFetch = await db.select().from(cards).where(eq(cards.id, cardId)).get();
-  if (!afterFetch) return;
+  if (!afterFetch || afterFetch.deletedAt) return;
 
   const aiConfig = await getAiConfig();
   if (!aiConfig) {
@@ -337,7 +476,12 @@ export async function enrichCard(cardId: string, opts?: { force?: boolean }) {
         .set({ aiStatus: "skipped", updatedAt: now() })
         .where(eq(cards.id, cardId));
     }
-    await refreshFts(cardId);
+    if (fetchFailure) throw fetchFailure;
+    return;
+  }
+
+  if (!force && afterFetch.aiStatus === "ok") {
+    if (fetchFailure) throw fetchFailure;
     return;
   }
 
@@ -348,72 +492,95 @@ export async function enrichCard(cardId: string, opts?: { force?: boolean }) {
       .where(eq(cards.id, cardId));
   }
 
+  const aiInput = await db.select().from(cards).where(eq(cards.id, cardId)).get();
+  if (!aiInput || aiInput.deletedAt) return;
+
   try {
     const cats = await db.select().from(categories).all();
     const suggestion = await suggestForCard({
-      title: afterFetch.title,
-      author: afterFetch.author,
-      platform: afterFetch.platform,
-      url: afterFetch.url,
-      note: afterFetch.note,
-      description: afterFetch.description,
-      contentExcerpt: afterFetch.contentExcerpt,
+      title: aiInput.title,
+      author: aiInput.author,
+      platform: aiInput.platform,
+      url: aiInput.url,
+      note: aiInput.note,
+      description: aiInput.description,
+      contentExcerpt: aiInput.contentExcerpt,
       categories: cats.map((c) => c.name),
     });
 
-    let categoryId = afterFetch.categoryId;
-    if (suggestion.category) {
-      const cat = cats.find((c) => c.name === suggestion.category);
-      if (cat) categoryId = cat.id;
-    } else if (force) {
-      categoryId = afterFetch.categoryId;
+    const latest = await db.select().from(cards).where(eq(cards.id, cardId)).get();
+    if (!latest || latest.deletedAt) return;
+    if (!sameAiEvidence(aiInput, latest)) {
+      queueEnrichment(cardId, { force });
+      return;
     }
 
-    const isPureThought = !afterFetch.url;
+    let suggestedCategoryId = aiInput.categoryId;
+    if (suggestion.category) {
+      const cat = cats.find((c) => c.name === suggestion.category);
+      if (cat) suggestedCategoryId = cat.id;
+    }
+
+    const categoryChangedDuringRequest = latest.categoryId !== aiInput.categoryId;
+    const isPureThought = !latest.url;
     const bodyForTitle =
-      afterFetch.contentExcerpt?.trim() ||
-      afterFetch.description?.trim() ||
+      latest.contentExcerpt?.trim() ||
+      latest.description?.trim() ||
       null;
     // I3: pure thoughts — category only; never overwrite user title
     // Link cards: AI 精炼短摘要 → title
-    const nextTitle = isPureThought
-      ? afterFetch.title
+    const nextTitle = isPureThought || latest.titleLocked
+      ? latest.title
       : titleFromAi({
-          existing: afterFetch.title,
+          existing: latest.title,
           aiTitle: suggestion.title,
           aiSummary: suggestion.summary,
           ruleFromBody: bodyForTitle,
           force,
         });
     const nextSummary = isPureThought
-      ? afterFetch.summary
+      ? latest.summary
       : force
         ? suggestion.summary
-        : afterFetch.summary || suggestion.summary;
+        : latest.summary || suggestion.summary;
 
-    await db
+    const updated = await db
       .update(cards)
       .set({
-        categoryId: force
-          ? suggestion.category
-            ? categoryId
-            : afterFetch.categoryId
-          : afterFetch.categoryId || categoryId,
+        categoryId: latest.categoryLocked || categoryChangedDuringRequest
+          ? latest.categoryId
+          : force
+            ? suggestion.category
+              ? suggestedCategoryId
+              : latest.categoryId
+            : latest.categoryId || suggestedCategoryId,
         title: nextTitle,
         summary: nextSummary,
         summaryBasis: isPureThought
-          ? afterFetch.summaryBasis
+          ? latest.summaryBasis
           : force
             ? suggestion.summaryBasis
-            : afterFetch.summaryBasis || suggestion.summaryBasis,
+            : latest.summaryBasis || suggestion.summaryBasis,
         aiStatus: "ok",
         updatedAt: now(),
       })
-      .where(eq(cards.id, cardId));
+      .where(
+        and(
+          eq(cards.id, cardId),
+          eq(cards.updatedAt, latest.updatedAt),
+          isNull(cards.deletedAt)
+        )
+      );
+    if (updated.changes !== 1) {
+      queueEnrichment(cardId, { force });
+      return;
+    }
   } catch (e) {
+    const current = await db.select().from(cards).where(eq(cards.id, cardId)).get();
+    if (!current || current.deletedAt) return;
     let prevRaw: Record<string, unknown> = {};
     try {
-      prevRaw = afterFetch.rawMeta ? JSON.parse(afterFetch.rawMeta) : {};
+      prevRaw = current.rawMeta ? JSON.parse(current.rawMeta) : {};
     } catch {
       prevRaw = {};
     }
@@ -421,16 +588,17 @@ export async function enrichCard(cardId: string, opts?: { force?: boolean }) {
       .update(cards)
       .set({
         aiStatus: "failed",
-        rawMeta: JSON.stringify({
+        rawMeta: serializeRawMeta({
           ...prevRaw,
           aiError: String(e),
         }),
         updatedAt: now(),
       })
       .where(eq(cards.id, cardId));
+    throw e;
   }
 
-  await refreshFts(cardId);
+  if (fetchFailure) throw fetchFailure;
 }
 
 export interface ListQuery {
@@ -448,8 +616,10 @@ export interface ListQuery {
 }
 
 export async function listCards(query: ListQuery): Promise<{ items: FlashCard[]; total: number }> {
-  const limit = Math.min(query.limit ?? 100, 200);
-  const offset = query.offset ?? 0;
+  const requestedLimit = Number.isFinite(query.limit) ? Math.floor(query.limit!) : 100;
+  const requestedOffset = Number.isFinite(query.offset) ? Math.floor(query.offset!) : 0;
+  const limit = Math.max(1, Math.min(requestedLimit, 200));
+  const offset = Math.max(0, requestedOffset);
 
   const conditions = [];
   if (query.trash) {
@@ -492,46 +662,41 @@ export async function listCards(query: ListQuery): Promise<{ items: FlashCard[];
   }
   if (query.aiFailed) conditions.push(eq(cards.aiStatus, "failed"));
 
-  let idFilter: string[] | null = null;
   if (query.q?.trim()) {
-    const raw = query.q.trim();
-    let ftsIds: string[] = [];
-    try {
-      const safe = raw.replace(/["*]/g, " ").trim();
-      if (safe) {
-        const fts = sqlite
-          .prepare(
-            `SELECT card_id FROM cards_fts WHERE cards_fts MATCH ? LIMIT 500`
-          )
-          .all(safe) as { card_id: string }[];
-        ftsIds = fts.map((r) => r.card_id);
-      }
-    } catch {
-      ftsIds = [];
+    const raw = query.q.trim().slice(0, 200);
+    const terms = raw
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .split(/\s+/)
+      .map((term) => term.replace(/"/g, '""'))
+      .filter(Boolean);
+    // LIKE is retained for CJK substring search, but user input is literal:
+    // `%` and `_` must not silently expand to database wildcards.
+    const likePattern = `%${raw
+      .replace(/\\/g, "\\\\")
+      .replace(/%/g, "\\%")
+      .replace(/_/g, "\\_")}%`;
+    const substringMatch = or(
+      sql`${cards.title} LIKE ${likePattern} ESCAPE '\\'`,
+      sql`${cards.summary} LIKE ${likePattern} ESCAPE '\\'`,
+      sql`${cards.note} LIKE ${likePattern} ESCAPE '\\'`,
+      sql`${cards.author} LIKE ${likePattern} ESCAPE '\\'`,
+      sql`${cards.url} LIKE ${likePattern} ESCAPE '\\'`,
+      sql`${cards.description} LIKE ${likePattern} ESCAPE '\\'`,
+      sql`${cards.contentExcerpt} LIKE ${likePattern} ESCAPE '\\'`
+    )!;
+    if (terms.length > 0) {
+      const ftsQuery = terms.map((term) => `"${term}"`).join(" AND ");
+      conditions.push(
+        or(
+          sql`${cards.id} IN (
+            SELECT card_id FROM cards_fts WHERE cards_fts MATCH ${ftsQuery}
+          )`,
+          substringMatch
+        )!
+      );
+    } else {
+      conditions.push(substringMatch);
     }
-    // Always also OR with LIKE for CJK friendliness
-    const likeIds = (
-      await db
-        .select({ id: cards.id })
-        .from(cards)
-        .where(
-          or(
-            like(cards.title, `%${raw}%`),
-            like(cards.note, `%${raw}%`),
-            like(cards.author, `%${raw}%`),
-            like(cards.url, `%${raw}%`)
-          )
-        )
-        .all()
-    ).map((r) => r.id);
-    idFilter = [...new Set([...ftsIds, ...likeIds])];
-  }
-
-
-
-  if (idFilter) {
-    if (idFilter.length === 0) return { items: [], total: 0 };
-    conditions.push(sql`${cards.id} IN (${sql.join(idFilter.map((id) => sql`${id}`), sql`, `)})`);
   }
 
   const where = conditions.length ? and(...conditions) : undefined;
@@ -551,7 +716,9 @@ export async function listCards(query: ListQuery): Promise<{ items: FlashCard[];
     .where(where)
     .get();
 
-  const items = await Promise.all(rows.map(toFlashCard));
+  const categoryRows = await db.select().from(categories).all();
+  const categoryNames = new Map(categoryRows.map((category) => [category.id, category.name]));
+  const items = await Promise.all(rows.map((row) => toFlashCard(row, categoryNames)));
   return { items, total: countRow?.c ?? items.length };
 }
 
@@ -577,21 +744,50 @@ export async function updateCard(
   if (!row || row.deletedAt) return null;
 
   const updates: Partial<typeof cards.$inferInsert> = { updatedAt: now() };
-  if (patch.title !== undefined) updates.title = patch.title;
-  if (patch.author !== undefined) updates.author = patch.author;
+  let urlChanged = false;
+  if (patch.title !== undefined) {
+    updates.title = patch.title;
+    updates.titleLocked = 1;
+  }
+  if (patch.author !== undefined) {
+    updates.author = patch.author;
+    updates.authorLocked = 1;
+  }
   if (patch.note !== undefined) updates.note = patch.note;
-  if (patch.categoryId !== undefined) updates.categoryId = patch.categoryId;
+  if (patch.categoryId !== undefined) {
+    updates.categoryId = patch.categoryId;
+    updates.categoryLocked = 1;
+  }
   if (patch.status !== undefined) updates.status = patch.status;
   if (patch.platform !== undefined) updates.platform = patch.platform;
   if (patch.url !== undefined) {
-    updates.url = patch.url;
-    updates.urlNormalized = patch.url ? normalizeUrl(patch.url) : null;
-    if (patch.url) updates.platform = detectPlatform(patch.url);
+    const parsedUrl = patch.url ? parseHttpUrl(patch.url) : null;
+    const normalized = parsedUrl ? normalizeUrl(parsedUrl) : null;
+    urlChanged = normalized !== row.urlNormalized;
+    updates.url = parsedUrl;
+    updates.urlNormalized = normalized;
+    if (parsedUrl) updates.platform = detectPlatform(parsedUrl);
+    if (urlChanged) {
+      updates.fetchStatus = parsedUrl ? "pending" : "skipped";
+      updates.aiStatus = "pending";
+      updates.thumbnailKey = null;
+      updates.mediaJson = null;
+      updates.description = null;
+      updates.contentExcerpt = !parsedUrl && patch.note
+        ? patch.note.slice(0, 6000)
+        : null;
+      updates.summary = null;
+      updates.summaryBasis = null;
+      updates.rawMeta = null;
+    }
   }
 
   await db.update(cards).set(updates).where(eq(cards.id, id));
+  if (urlChanged) {
+    await deleteThumbnailByKey(row.thumbnailKey);
+    queueEnrichment(id);
+  }
 
-  await refreshFts(id);
   return getCard(id);
 }
 
@@ -604,7 +800,11 @@ export async function softDeleteCard(id: string): Promise<boolean> {
 
 export async function restoreCard(id: string): Promise<FlashCard | null> {
   await db.update(cards).set({ deletedAt: null, updatedAt: now() }).where(eq(cards.id, id));
-  return getCard(id);
+  const card = await getCard(id);
+  if (card && (card.fetchStatus === "pending" || card.aiStatus === "pending")) {
+    queueEnrichment(id);
+  }
+  return card;
 }
 
 /**
@@ -632,9 +832,8 @@ export async function purgeCard(
     }
   }
 
-  await deleteThumbnailByKey(row.thumbnailKey);
-  sqlite.prepare("DELETE FROM cards_fts WHERE card_id = ?").run(id);
   await db.delete(cards).where(eq(cards.id, id));
+  await deleteThumbnailByKey(row.thumbnailKey);
   return { ok: true };
 }
 
@@ -646,7 +845,7 @@ export async function fillMissingThumbnail(cardId: string): Promise<boolean> {
   const row = await db.select().from(cards).where(eq(cards.id, cardId)).get();
   if (!row || row.deletedAt || !row.url) return false;
   const needsThumb = !row.thumbnailKey;
-  const needsAuthor = !row.author;
+  const needsAuthor = !row.author && !row.authorLocked;
   if (!needsThumb && !needsAuthor) return false;
   try {
     const meta = await fetchUrlMeta(row.url);
@@ -790,9 +989,10 @@ export async function upsertImportedBookmark(input: {
   author?: string | null;
   /** Full post body for AI evidence (stored as contentExcerpt, not page meta description) */
   description?: string | null;
+  media?: CardMediaItem[] | null;
   raw?: unknown;
 }): Promise<"imported" | "claimed" | "already" | "skipped"> {
-  const url = input.url.trim();
+  const url = parseHttpUrl(input.url.trim());
   const urlNormalized = normalizeUrl(url);
   const externalId = input.externalId.trim();
   if (!url || !externalId) return "skipped";
@@ -864,18 +1064,19 @@ export async function upsertImportedBookmark(input: {
     title,
     author,
     thumbnailKey: null,
-    mediaJson: null,
+    mediaJson: input.media?.length ? JSON.stringify(input.media) : null,
     note: null,
     categoryId: null,
     status: "inbox",
-    // partial so enrich still runs for thumb / AI, but title merge won't clobber good titles
-    fetchStatus: title || contentExcerpt ? "partial" : "pending",
+    // Timeline imports already contain the canonical body/media. Avoid a second
+    // per-card X request; AI enrichment still runs from this captured evidence.
+    fetchStatus: title || contentExcerpt || input.media?.length ? "ok" : "pending",
     aiStatus: hasAi ? "pending" : "skipped",
     summary: null,
     description: null,
     contentExcerpt,
     summaryBasis: null,
-    rawMeta: input.raw ? JSON.stringify({ import: input.raw }) : null,
+    rawMeta: input.raw ? serializeRawMeta({ import: input.raw }) : null,
     importSource: input.importSource,
     externalId,
     depositedAt: null,
@@ -885,20 +1086,12 @@ export async function upsertImportedBookmark(input: {
     deletedAt: null,
   });
 
-  await refreshFts(id);
   queueEnrichment(id);
   return "imported";
 }
 
 export async function appendNote(id: string, note: string): Promise<FlashCard | null> {
-  const row = await db.select().from(cards).where(eq(cards.id, id)).get();
-  if (!row || row.deletedAt) return null;
-  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-  const appended = row.note
-    ? `${row.note}\n\n---\n[${stamp} 追加]\n${note}`
-    : note;
-  await db.update(cards).set({ note: appended, updatedAt: now() }).where(eq(cards.id, id));
-  await refreshFts(id);
+  if (!appendNoteTransaction(id, note, false)) return null;
   return getCard(id);
 }
 
@@ -940,7 +1133,13 @@ export async function exportObsidian(cardId: string): Promise<FlashCard | null> 
   const card = await getCard(cardId);
   if (!card || card.deletedAt) return null;
   const minio = await getMinioConfig();
-  if (!minio) throw new Error("MINIO_NOT_CONFIGURED");
+  if (!minio) {
+    throw new AppError(
+      "MINIO_NOT_CONFIGURED",
+      422,
+      "请先配置 MinIO / Obsidian 存储"
+    );
+  }
 
   const md = `---
 闪念id: ${card.id}
@@ -964,9 +1163,20 @@ ${card.note || "_（无）_"}
 ${card.summary || "_（无）_"}
 `;
 
-  const key = vaultObjectKey(card.id, card.title, minio.vaultPrefix);
-  const ok = await uploadVaultMarkdown(key, md);
-  if (!ok) throw new Error("MINIO_UPLOAD_FAILED");
+  // Once delivered, keep overwriting the same object. A later title edit must
+  // not strand an older Markdown file under a second key.
+  const key =
+    card.depositedObjectKey ||
+    vaultObjectKey(card.id, card.title, minio.vaultPrefix);
+  let ok: string | null;
+  try {
+    ok = await uploadVaultMarkdown(key, md);
+  } catch {
+    throw new AppError("MINIO_UPLOAD_FAILED", 503, "Markdown 导出失败，请稍后重试");
+  }
+  if (!ok) {
+    throw new AppError("MINIO_UPLOAD_FAILED", 503, "Markdown 导出失败，请稍后重试");
+  }
 
   await db
     .update(cards)
@@ -983,8 +1193,9 @@ ${card.summary || "_（无）_"}
 
 export async function exportAllJson() {
   const rows = await db.select().from(cards).where(isNull(cards.deletedAt)).all();
-  const items = await Promise.all(rows.map(toFlashCard));
   const cats = await db.select().from(categories).all();
+  const categoryNames = new Map(cats.map((category) => [category.id, category.name]));
+  const items = await Promise.all(rows.map((row) => toFlashCard(row, categoryNames)));
   return {
     exportedAt: new Date().toISOString(),
     categories: cats,

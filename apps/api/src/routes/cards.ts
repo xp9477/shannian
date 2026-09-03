@@ -2,15 +2,34 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { requireAuth, type AuthEnv } from "../middleware/auth.js";
 import * as cardsService from "../services/cards.js";
+import {
+  cardTextSchema,
+  cardUrlSchema,
+  shortTextSchema,
+} from "../lib/validation.js";
 
 export const cardsRoutes = new Hono<AuthEnv>();
 cardsRoutes.use("*", requireAuth);
 
 cardsRoutes.get("/", async (c) => {
-  const q = c.req.query();
+  const q = z
+    .object({
+      q: z.string().max(200).optional(),
+      status: z.enum(["all", "inbox", "organized", "deposited"]).default("all"),
+      categoryId: z.string().max(128).optional(),
+      platform: z.string().max(32).optional(),
+      thoughtsOnly: z.enum(["0", "1"]).optional(),
+      linksOnly: z.enum(["0", "1"]).optional(),
+      incomplete: z.enum(["0", "1"]).optional(),
+      aiFailed: z.enum(["0", "1"]).optional(),
+      trash: z.enum(["0", "1"]).optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(100),
+      offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+    })
+    .parse(c.req.query());
   const result = await cardsService.listCards({
     q: q.q,
-    status: (q.status as cardsService.ListQuery["status"]) || "all",
+    status: q.status,
     categoryId: q.categoryId,
     platform: q.platform,
     thoughtsOnly: q.thoughtsOnly === "1",
@@ -18,8 +37,8 @@ cardsRoutes.get("/", async (c) => {
     incomplete: q.incomplete === "1",
     aiFailed: q.aiFailed === "1",
     trash: q.trash === "1",
-    limit: q.limit ? Number(q.limit) : 100,
-    offset: q.offset ? Number(q.offset) : 0,
+    limit: q.limit,
+    offset: q.offset,
   });
   return c.json(result);
 });
@@ -27,9 +46,9 @@ cardsRoutes.get("/", async (c) => {
 cardsRoutes.post("/bulk", async (c) => {
   const body = z
     .object({
-      ids: z.array(z.string()).min(1).max(200),
+      ids: z.array(z.string().min(1).max(128)).min(1).max(200),
       action: z.enum(["organize", "trash", "retry"]),
-    })
+    }).strict()
     .parse(await c.req.json());
   const result = await cardsService.bulkCards(body.ids, body.action);
   return c.json(result);
@@ -38,10 +57,10 @@ cardsRoutes.post("/bulk", async (c) => {
 cardsRoutes.post("/", async (c) => {
   const body = z
     .object({
-      text: z.string().optional(),
-      url: z.string().nullable().optional(),
-      note: z.string().nullable().optional(),
-    })
+      text: cardTextSchema.optional(),
+      url: cardUrlSchema.nullable().optional(),
+      note: cardTextSchema.nullable().optional(),
+    }).strict()
     .parse(await c.req.json());
   try {
     const result = await cardsService.createCard(body);
@@ -65,11 +84,11 @@ cardsRoutes.get("/:id", async (c) => {
 cardsRoutes.patch("/:id", async (c) => {
   const body = z
     .object({
-      title: z.string().nullable().optional(),
-      author: z.string().nullable().optional(),
-      note: z.string().nullable().optional(),
-      url: z.string().nullable().optional(),
-      categoryId: z.string().nullable().optional(),
+      title: shortTextSchema.nullable().optional(),
+      author: shortTextSchema.nullable().optional(),
+      note: cardTextSchema.nullable().optional(),
+      url: cardUrlSchema.nullable().optional(),
+      categoryId: z.string().max(128).nullable().optional(),
       status: z.enum(["inbox", "organized", "deposited"]).optional(),
       platform: z
         .enum([
@@ -84,7 +103,7 @@ cardsRoutes.patch("/:id", async (c) => {
         ])
         .nullable()
         .optional(),
-    })
+    }).strict()
     .parse(await c.req.json());
   const card = await cardsService.updateCard(c.req.param("id"), body);
   if (!card) return c.json({ error: "NOT_FOUND" }, 404);
@@ -92,7 +111,10 @@ cardsRoutes.patch("/:id", async (c) => {
 });
 
 cardsRoutes.post("/:id/append-note", async (c) => {
-  const body = z.object({ note: z.string().min(1) }).parse(await c.req.json());
+  const body = z
+    .object({ note: cardTextSchema.min(1) })
+    .strict()
+    .parse(await c.req.json());
   const card = await cardsService.appendNote(c.req.param("id"), body.note);
   if (!card) return c.json({ error: "NOT_FOUND" }, 404);
   return c.json({ card });
@@ -110,16 +132,9 @@ cardsRoutes.post("/:id/retry-enrich", async (c) => {
 });
 
 cardsRoutes.post("/:id/obsidian", async (c) => {
-  try {
-    const card = await cardsService.exportObsidian(c.req.param("id"));
-    if (!card) return c.json({ error: "NOT_FOUND" }, 404);
-    return c.json({ card });
-  } catch (e) {
-    if (e instanceof Error && e.message === "MINIO_NOT_CONFIGURED") {
-      return c.json({ error: "MINIO_NOT_CONFIGURED" }, 400);
-    }
-    throw e;
-  }
+  const card = await cardsService.exportObsidian(c.req.param("id"));
+  if (!card) return c.json({ error: "NOT_FOUND" }, 404);
+  return c.json({ card });
 });
 
 cardsRoutes.delete("/:id", async (c) => {

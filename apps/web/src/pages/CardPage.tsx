@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import type { CardStatus, FlashCard, SummaryBasis } from "@shannian/shared";
 import { PLATFORM_LABELS } from "@shannian/shared";
 import {
+  Archive,
   CheckCircle2,
   ChevronDown,
   ExternalLink,
@@ -27,8 +28,8 @@ import { platformColor, platformMark } from "../lib/platform";
 
 function statusLabel(status: CardStatus) {
   if (status === "inbox") return "收件箱";
-  // organized + legacy deposited → 沉淀
-  return "沉淀";
+  // organized + legacy deposited are both decisions to keep the item.
+  return "已保留";
 }
 
 function summaryStatusLabel(card: FlashCard): { text: string; variant: "outline" | "warning" | "success" | "danger" | "indigo" } {
@@ -51,12 +52,16 @@ function OrganizePanel({
   categoryId,
   onCategoryChange,
   onStatusChange,
+  onExport,
+  exporting,
 }: {
   card: FlashCard;
   categories: { id: string; name: string }[];
   categoryId: string;
   onCategoryChange: (id: string) => void;
   onStatusChange: (s: CardStatus) => void;
+  onExport: () => void;
+  exporting: boolean;
 }) {
   const uiStatus: CardStatus =
     card.status === "deposited" ? "organized" : card.status;
@@ -66,7 +71,7 @@ function OrganizePanel({
       <div>
         <div className="text-[14px] font-semibold tracking-tight">整理</div>
         <p className="mt-1 text-[12px] leading-relaxed text-[var(--color-muted-foreground)]">
-          有用 → 沉淀；没用 → 回收站。分类可选。
+          有用 → 保留；没用 → 回收站。导出是单独、可重试的动作。
         </p>
       </div>
       <Separator className="opacity-70" />
@@ -107,6 +112,28 @@ function OrganizePanel({
           ))}
         </div>
       </div>
+
+      <div className="space-y-2">
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full"
+          disabled={exporting}
+          onClick={onExport}
+        >
+          <Archive className="size-3.5" />
+          {exporting
+            ? "正在导出…"
+            : card.depositedAt
+              ? "重新导出到 Obsidian"
+              : "导出到 Obsidian"}
+        </Button>
+        {card.depositedAt && (
+          <p className="text-[11px] text-[var(--color-muted-foreground)]">
+            上次导出：{new Date(card.depositedAt).toLocaleString()}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -126,51 +153,121 @@ export default function CardPage() {
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [organizeOpen, setOrganizeOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [inbox, setInbox] = useState(0);
   const moreRef = useRef<HTMLDivElement>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeIdRef = useRef(id);
+  const editingRef = useRef({ title: false, author: false, note: false });
+  const cardReadRequestIdRef = useRef(0);
+  const writesInFlightRef = useRef(0);
+  const writeTailRef = useRef<Promise<void>>(Promise.resolve());
+  const cancelAuthorEditRef = useRef(false);
+  const mountedRef = useRef(true);
 
-  async function load() {
-    if (!id) return;
-    const [{ card: c }, cats, count] = await Promise.all([
-      api.getCard(id),
-      api.categories(),
-      api.inboxCount(),
-    ]);
-    setCard(c);
-    setTitle(c.title || "");
-    setAuthor(c.author || "");
-    setNote(c.note || "");
-    setCategoryId(c.categoryId || "");
-    setCategories(cats.items);
-    setInbox(count.count);
-  }
+  activeIdRef.current = id;
+  editingRef.current = {
+    title: editingTitle,
+    author: editingAuthor,
+    note: editingNote,
+  };
+
+  const applyCard = useCallback((next: FlashCard) => {
+    setCard(next);
+    const editing = editingRef.current;
+    if (!editing.title) setTitle(next.title || "");
+    if (!editing.author) setAuthor(next.author || "");
+    if (!editing.note) setNote(next.note || "");
+    setCategoryId(next.categoryId || "");
+  }, []);
 
   useEffect(() => {
-    load().catch(() => navigate("/"));
-  }, [id]);
-
-  // Poll while AI/fetch pending
-  useEffect(() => {
-    if (!card) return;
-    const busy = card.aiStatus === "pending" || card.fetchStatus === "pending";
-    if (busy) {
-      if (!pollRef.current) {
-        pollRef.current = setInterval(() => {
-          load().catch(() => {});
-        }, 2000);
-      }
-    } else if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+    mountedRef.current = true;
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
+      mountedRef.current = false;
+      cardReadRequestIdRef.current += 1;
     };
-  }, [card?.aiStatus, card?.fetchStatus, id]);
+  }, []);
+
+  // Page bootstrap: ancillary navigation data is loaded once per card, never by polling.
+  useEffect(() => {
+    if (!id) {
+      navigate("/");
+      return;
+    }
+
+    let cancelled = false;
+    const requestedId = id;
+    const requestId = ++cardReadRequestIdRef.current;
+    setCard(null);
+    setEditingTitle(false);
+    setEditingAuthor(false);
+    setEditingNote(false);
+
+    Promise.all([api.getCard(requestedId), api.categories(), api.inboxCount()])
+      .then(([{ card: next }, cats, count]) => {
+        if (
+          cancelled ||
+          !mountedRef.current ||
+          activeIdRef.current !== requestedId ||
+          cardReadRequestIdRef.current !== requestId
+        ) {
+          return;
+        }
+        applyCard(next);
+        setCategories(cats.items);
+        setInbox(count.count);
+      })
+      .catch(() => {
+        if (!cancelled && activeIdRef.current === requestedId) navigate("/");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyCard, id, navigate]);
+
+  const refreshCard = useCallback(async () => {
+    const requestedId = id;
+    if (
+      !requestedId ||
+      activeIdRef.current !== requestedId ||
+      writesInFlightRef.current > 0
+    ) {
+      return false;
+    }
+
+    const requestId = ++cardReadRequestIdRef.current;
+    const { card: next } = await api.getCard(requestedId);
+    if (
+      !mountedRef.current ||
+      activeIdRef.current !== requestedId ||
+      cardReadRequestIdRef.current !== requestId
+    ) {
+      return false;
+    }
+    applyCard(next);
+    return true;
+  }, [applyCard, id]);
+
+  // Poll only the card. Recursive scheduling guarantees at most one poll in flight.
+  const hasPendingWork =
+    card?.aiStatus === "pending" || card?.fetchStatus === "pending";
+  useEffect(() => {
+    if (!hasPendingWork) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      await refreshCard().catch(() => false);
+      if (!cancelled) timer = setTimeout(poll, 2000);
+    };
+
+    timer = setTimeout(poll, 2000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [hasPendingWork, refreshCard]);
 
   useEffect(() => {
     function onDoc(e: MouseEvent) {
@@ -182,31 +279,139 @@ export default function CardPage() {
     return () => document.removeEventListener("mousedown", onDoc);
   }, [moreOpen]);
 
-  async function saveFields(patch: Record<string, unknown>, silent = false) {
-    if (!id) return;
+  async function saveFields(
+    patch: Record<string, unknown>,
+    silent = false
+  ): Promise<FlashCard | null> {
+    if (!id) return null;
+    const requestedId = id;
+    // Any read that began before this write must not overwrite its result.
+    cardReadRequestIdRef.current += 1;
+    writesInFlightRef.current += 1;
     try {
-      const { card: next } = await api.updateCard(id, patch);
-      setCard(next);
-      setTitle(next.title || "");
-      setAuthor(next.author || "");
-      setNote(next.note || "");
-      setCategoryId(next.categoryId || "");
+      // Serialize mutations from this screen. This prevents a fast second
+      // control change (or an input blur plus click) from racing an earlier
+      // PATCH and rendering an older server response last.
+      const write = writeTailRef.current.then(
+        () => api.updateCard(requestedId, patch),
+        () => api.updateCard(requestedId, patch)
+      );
+      writeTailRef.current = write.then(
+        () => undefined,
+        () => undefined
+      );
+      const { card: next } = await write;
+      if (!mountedRef.current || activeIdRef.current !== requestedId) return null;
+      applyCard(next);
       if (!silent) toast.success("已保存");
+      return next;
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "保存失败");
+      if (mountedRef.current) {
+        toast.error(e instanceof Error ? e.message : "保存失败");
+      }
+      return null;
+    } finally {
+      writesInFlightRef.current = Math.max(0, writesInFlightRef.current - 1);
     }
   }
 
+  async function commitTitle() {
+    setEditingTitle(false);
+    const saved = await saveFields({ title: title || null });
+    if (!mountedRef.current) return;
+    setTitle(saved ? saved.title || "" : card?.title || "");
+  }
+
+  async function commitAuthor(draft: string) {
+    setEditingAuthor(false);
+    if (draft === (card?.author || "")) return;
+    const saved = await saveFields({ author: draft || null }, true);
+    if (!mountedRef.current) return;
+    setAuthor(saved ? saved.author || "" : card?.author || "");
+  }
+
+  async function commitNote() {
+    setEditingNote(false);
+    const saved = await saveFields({ note: note || null });
+    if (!mountedRef.current) return;
+    setNote(saved ? saved.note || "" : card?.note || "");
+  }
+
   async function onCategoryChange(nextId: string) {
+    const previousId = card?.categoryId || "";
     setCategoryId(nextId);
-    await saveFields({ categoryId: nextId || null }, true);
-    toast.success("分类已更新");
+    const saved = await saveFields({ categoryId: nextId || null }, true);
+    if (saved) toast.success("分类已更新");
+    else if (mountedRef.current) setCategoryId(previousId);
   }
 
   async function onStatusChange(status: CardStatus) {
     if (!id || card?.status === status) return;
-    await saveFields({ status }, true);
+    const saved = await saveFields({ status }, true);
+    if (!saved) return;
+    // Another queued action (for example export) may have changed status first;
+    // read the authoritative count instead of applying a stale local delta.
+    const count = await api.inboxCount().catch(() => null);
+    if (count && mountedRef.current) setInbox(count.count);
     toast.success(`已标为${statusLabel(status)}`);
+  }
+
+  async function retryEnrichment() {
+    if (!id) return;
+    const requestedId = id;
+    cardReadRequestIdRef.current += 1;
+    writesInFlightRef.current += 1;
+    try {
+      const write = writeTailRef.current.then(
+        () => api.retryEnrich(requestedId),
+        () => api.retryEnrich(requestedId)
+      );
+      writeTailRef.current = write.then(
+        () => undefined,
+        () => undefined
+      );
+      const { card: next } = await write;
+      if (!mountedRef.current || activeIdRef.current !== requestedId) return;
+      applyCard(next);
+      toast.message("已重新排队解析/AI（将覆盖摘要与分类建议）");
+    } catch (e) {
+      if (mountedRef.current) {
+        toast.error(e instanceof Error ? e.message : "重试失败");
+      }
+    } finally {
+      writesInFlightRef.current = Math.max(0, writesInFlightRef.current - 1);
+    }
+  }
+
+  async function exportToObsidian() {
+    if (!id || exporting) return;
+    const requestedId = id;
+    cardReadRequestIdRef.current += 1;
+    writesInFlightRef.current += 1;
+    setExporting(true);
+    try {
+      const write = writeTailRef.current.then(
+        () => api.exportObsidian(requestedId),
+        () => api.exportObsidian(requestedId)
+      );
+      writeTailRef.current = write.then(
+        () => undefined,
+        () => undefined
+      );
+      const { card: next } = await write;
+      if (!mountedRef.current || activeIdRef.current !== requestedId) return;
+      applyCard(next);
+      const count = await api.inboxCount().catch(() => null);
+      if (count && mountedRef.current) setInbox(count.count);
+      toast.success("已导出 Markdown 到 Obsidian 存储");
+    } catch (error) {
+      if (!mountedRef.current) return;
+      const message = error instanceof Error ? error.message : "导出失败";
+      toast.error(message);
+    } finally {
+      writesInFlightRef.current = Math.max(0, writesInFlightRef.current - 1);
+      if (mountedRef.current) setExporting(false);
+    }
   }
 
   if (!card) {
@@ -233,6 +438,8 @@ export default function CardPage() {
     categoryId,
     onCategoryChange,
     onStatusChange,
+    onExport: exportToObsidian,
+    exporting,
   };
 
 
@@ -273,7 +480,7 @@ export default function CardPage() {
                 onClick={() => onStatusChange("organized")}
               >
                 <CheckCircle2 className="size-3.5" />
-                <span className="hidden sm:inline">沉淀</span>
+                <span className="hidden sm:inline">保留</span>
               </Button>
             )}
             {!isInbox && (
@@ -320,9 +527,7 @@ export default function CardPage() {
                     className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--color-muted)]"
                     onClick={async () => {
                       setMoreOpen(false);
-                      await api.retryEnrich(id!);
-                      toast.message("已重新排队解析/AI（将覆盖摘要与分类建议）");
-                      setTimeout(() => load(), 1500);
+                      await retryEnrichment();
                     }}
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
@@ -334,8 +539,14 @@ export default function CardPage() {
                     onClick={async () => {
                       setMoreOpen(false);
                       if (!confirm("移入回收站？")) return;
-                      await api.deleteCard(id!);
-                      navigate("/");
+                      try {
+                        await api.deleteCard(id!);
+                        if (mountedRef.current) navigate("/");
+                      } catch (e) {
+                        if (mountedRef.current) {
+                          toast.error(e instanceof Error ? e.message : "移入回收站失败");
+                        }
+                      }
                     }}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -363,8 +574,7 @@ export default function CardPage() {
                       className="text-lg font-semibold"
                       onKeyDown={(e) => {
                         if (e.key === "Enter") {
-                          setEditingTitle(false);
-                          saveFields({ title: title || null });
+                          void commitTitle();
                         }
                         if (e.key === "Escape") {
                           setTitle(card.title || "");
@@ -373,7 +583,7 @@ export default function CardPage() {
                       }}
                     />
                     <div className="flex gap-2">
-                      <Button size="sm" onClick={() => { setEditingTitle(false); saveFields({ title: title || null }); }}>
+                      <Button size="sm" onClick={() => void commitTitle()}>
                         完成
                       </Button>
                       <Button size="sm" variant="ghost" onClick={() => { setTitle(card.title || ""); setEditingTitle(false); }}>
@@ -405,16 +615,31 @@ export default function CardPage() {
                       value={author}
                       onChange={(e) => setAuthor(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") { setEditingAuthor(false); saveFields({ author: author || null }, true); }
-                        if (e.key === "Escape") { setAuthor(card.author || ""); setEditingAuthor(false); }
+                        if (e.key === "Enter") e.currentTarget.blur();
+                        if (e.key === "Escape") {
+                          cancelAuthorEditRef.current = true;
+                          setAuthor(card.author || "");
+                          setEditingAuthor(false);
+                        }
                       }}
-                      onBlur={() => {
-                        setEditingAuthor(false);
-                        if ((author || "") !== (card.author || "")) saveFields({ author: author || null }, true);
+                      onBlur={(e) => {
+                        const draft = e.currentTarget.value;
+                        if (cancelAuthorEditRef.current) {
+                          cancelAuthorEditRef.current = false;
+                          return;
+                        }
+                        void commitAuthor(draft);
                       }}
                     />
                   ) : (
-                    <button type="button" className="hover:text-[var(--color-foreground)] hover:underline" onClick={() => setEditingAuthor(true)}>
+                    <button
+                      type="button"
+                      className="hover:text-[var(--color-foreground)] hover:underline"
+                      onClick={() => {
+                        cancelAuthorEditRef.current = false;
+                        setEditingAuthor(true);
+                      }}
+                    >
                       {author || "添加作者"}
                     </button>
                   )}
@@ -433,7 +658,12 @@ export default function CardPage() {
               {(!card.media || card.media.length === 0) && (
                 <div className="hidden h-28 w-28 shrink-0 overflow-hidden rounded-2xl bg-[var(--color-muted)] ring-1 ring-black/[0.04] sm:block dark:ring-white/[0.06]">
                   {card.thumbnailUrl ? (
-                    <img src={card.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                    <img
+                      src={card.thumbnailUrl}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      className="h-full w-full object-cover"
+                    />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center text-[var(--color-muted-foreground)] opacity-50">
                       {card.url ? "↗" : "·"}
@@ -600,7 +830,7 @@ export default function CardPage() {
                 <div className="space-y-2">
                   <Textarea autoFocus rows={8} className="rounded-2xl text-[15px] leading-relaxed" value={note} onChange={(e) => setNote(e.target.value)} placeholder="写下你的想法、判断或摘抄…" />
                   <div className="flex gap-2">
-                    <Button size="sm" className="rounded-full" onClick={() => { setEditingNote(false); saveFields({ note: note || null }); }}>完成</Button>
+                    <Button size="sm" className="rounded-full" onClick={() => void commitNote()}>完成</Button>
                     <Button size="sm" variant="ghost" className="rounded-full" onClick={() => { setNote(card.note || ""); setEditingNote(false); }}>取消</Button>
                   </div>
                 </div>

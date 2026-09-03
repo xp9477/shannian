@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { FlashCard } from "@shannian/shared";
 import { toast } from "sonner";
@@ -11,21 +11,32 @@ export default function TrashPage() {
   const [items, setItems] = useState<FlashCard[]>([]);
   const [inbox, setInbox] = useState(0);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  const mountedRef = useRef(true);
+  const actionsRef = useRef(new Set<string>());
 
-  async function load() {
+  const load = useCallback(async () => {
     const [res, count, cats] = await Promise.all([
       api.listCards({ trash: "1" }),
       api.inboxCount(),
       api.categories(),
     ]);
+    if (!mountedRef.current) return;
     setItems(res.items);
     setInbox(count.count);
     setCategories(cats.items);
-  }
+  }, []);
 
   useEffect(() => {
-    load().catch(console.error);
-  }, []);
+    mountedRef.current = true;
+    load().catch((error) => {
+      if (mountedRef.current) {
+        toast.error(error instanceof Error ? error.message : "加载回收站失败");
+      }
+    });
+    return () => {
+      mountedRef.current = false;
+    };
+  }, [load]);
 
   return (
     <AppShell
@@ -61,9 +72,17 @@ export default function TrashPage() {
                 variant="outline"
                 size="sm"
                 onClick={async () => {
-                  await api.restoreCard(card.id);
-                  toast.success("已恢复");
-                  load();
+                  if (actionsRef.current.has(card.id)) return;
+                  actionsRef.current.add(card.id);
+                  try {
+                    await api.restoreCard(card.id);
+                    toast.success("已恢复");
+                    await load();
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "恢复失败");
+                  } finally {
+                    actionsRef.current.delete(card.id);
+                  }
                 }}
               >
                 恢复
@@ -73,10 +92,12 @@ export default function TrashPage() {
                 size="sm"
                 onClick={async () => {
                   if (!confirm("永久删除？不可撤销。若来自 X 书签，将尝试取消原平台收藏。")) return;
+                  if (actionsRef.current.has(card.id)) return;
+                  actionsRef.current.add(card.id);
                   try {
                     await api.deleteCard(card.id, true);
                     toast.success("已永久删除");
-                    load();
+                    await load();
                   } catch (e) {
                     if (e instanceof ApiError && e.body.error === "REVOKE_FAILED") {
                       const msg = String(e.body.message || "取消原平台收藏失败");
@@ -88,7 +109,7 @@ export default function TrashPage() {
                         try {
                           await api.deleteCard(card.id, true, true);
                           toast.success("已强制删除本地记录");
-                          load();
+                          await load();
                         } catch (e2) {
                           toast.error(String(e2));
                         }
@@ -96,6 +117,8 @@ export default function TrashPage() {
                     } else {
                       toast.error(String(e));
                     }
+                  } finally {
+                    actionsRef.current.delete(card.id);
                   }
                 }}
               >

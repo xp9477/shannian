@@ -47,6 +47,8 @@ export default function LoginPage({ onDone }: { onDone: () => void }) {
         </label>
         <Input
           type="password"
+          autoComplete="current-password"
+          spellCheck={false}
           autoFocus
           className="h-10 rounded-xl"
           value={password}

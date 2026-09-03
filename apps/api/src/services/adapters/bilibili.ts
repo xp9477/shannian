@@ -1,11 +1,11 @@
 import type { PlatformAdapter } from "./types.js";
 import { webAdapter } from "./web.js";
+import { hostnameMatches } from "../../lib/url.js";
 
 export const bilibiliAdapter: PlatformAdapter = {
   id: "bilibili",
   match(url) {
-    const h = url.hostname.replace(/^www\./, "");
-    return h.includes("bilibili.com") || h === "b23.tv";
+    return hostnameMatches(url.hostname, "bilibili.com") || hostnameMatches(url.hostname, "b23.tv");
   },
   async fetchMeta(url) {
     // Try oEmbed-like public page meta via web adapter first

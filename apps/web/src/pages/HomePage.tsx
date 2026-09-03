@@ -87,6 +87,12 @@ export default function HomePage() {
   );
   const offsetRef = useRef(0);
   const captureRef = useRef<HTMLInputElement>(null);
+  const listRequestIdRef = useRef(0);
+  const activeListRequestsRef = useRef(0);
+  const activeQueryKeyRef = useRef("");
+  const quickSaveRef = useRef(false);
+  const cardActionsRef = useRef(new Set<string>());
+  const mountedRef = useRef(true);
 
   // Debounce search input → q
   useEffect(() => {
@@ -119,82 +125,158 @@ export default function HomePage() {
     setQ(qq);
   }, [searchParams]);
 
-  const listParams = useCallback(
-    (offset: number) => ({
+  const listQuery = useMemo(
+    () => ({
       q: q || undefined,
-      status: filter.status,
+      // A keyword is an intent to retrieve knowledge, not just the current
+      // inbox slice. Keep deliberately chosen category/platform filters, but
+      // search both inbox and organized cards by default.
+      status: q ? undefined : filter.status,
       categoryId: filter.categoryId,
       platform: platform || undefined,
       thoughtsOnly: filter.thoughtsOnly ? "1" : undefined,
       incomplete: incomplete ? "1" : undefined,
       aiFailed: aiFailed ? "1" : undefined,
       limit: String(PAGE_SIZE),
-      offset: String(offset),
     }),
-    [q, filter, platform, incomplete, aiFailed]
+    [
+      q,
+      filter.status,
+      filter.categoryId,
+      filter.thoughtsOnly,
+      platform,
+      incomplete,
+      aiFailed,
+    ]
   );
+  const queryKey = useMemo(() => JSON.stringify(listQuery), [listQuery]);
 
   const load = useCallback(
-    async (opts?: { append?: boolean }) => {
+    async (opts?: { append?: boolean; background?: boolean }) => {
       const append = Boolean(opts?.append);
-      if (append) setLoadingMore(true);
-      else setLoading(true);
+      const background = Boolean(opts?.background);
+
+      // Event handlers may resume after the user has already changed filters.
+      if (queryKey !== activeQueryKeyRef.current) return false;
+
+      // Background work never competes with a filter change or explicit load.
+      if (background && activeListRequestsRef.current > 0) return false;
+
+      const requestId = ++listRequestIdRef.current;
+      const requestQueryKey = queryKey;
+      const offset = append ? offsetRef.current : 0;
+      activeListRequestsRef.current += 1;
+      if (!background) {
+        setLoading(!append);
+        setLoadingMore(append);
+      }
+
       try {
-        const offset = append ? offsetRef.current : 0;
-        const [list, count, cats, settings] = await Promise.all([
-          api.listCards(listParams(offset)),
+        const [list, count] = await Promise.all([
+          api.listCards({ ...listQuery, offset: String(offset) }),
           api.inboxCount(),
-          api.categories(),
-          api.settings(),
         ]);
+
+        if (
+          !mountedRef.current ||
+          requestId !== listRequestIdRef.current ||
+          requestQueryKey !== activeQueryKeyRef.current
+        ) {
+          return false;
+        }
+
         setTotal(list.total);
         setInbox(count.count);
-        setCategories(cats.items);
-        setSetup(settings.setup);
         if (append) {
+          // Advance by server rows consumed, not by React's eventual merged
+          // state. State updaters may be replayed in development Strict Mode.
+          offsetRef.current = offset + list.items.length;
           setItems((prev) => {
             const seen = new Set(prev.map((x) => x.id));
             const merged = [...prev];
             for (const c of list.items) {
               if (!seen.has(c.id)) merged.push(c);
             }
-            offsetRef.current = merged.length;
             return merged;
           });
         } else {
           setItems(list.items);
           offsetRef.current = list.items.length;
-          setSelected(new Set());
+          if (!background) setSelected(new Set());
         }
+        return true;
       } catch (e) {
-        toast.error(String(e));
+        if (
+          mountedRef.current &&
+          requestId === listRequestIdRef.current &&
+          requestQueryKey === activeQueryKeyRef.current
+        ) {
+          toast.error(e instanceof Error ? e.message : String(e));
+        }
+        return false;
       } finally {
-        setLoading(false);
-        setLoadingMore(false);
+        activeListRequestsRef.current = Math.max(0, activeListRequestsRef.current - 1);
+        if (mountedRef.current && requestId === listRequestIdRef.current && !background) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
       }
     },
-    [listParams]
+    [listQuery, queryKey]
   );
 
   useEffect(() => {
+    activeQueryKeyRef.current = queryKey;
     offsetRef.current = 0;
     load({ append: false }).catch(() => {});
-  }, [load]);
+  }, [load, queryKey]);
 
-  // Soft poll while pending AI / missing thumbs in view
+  // Categories and setup capabilities are static for the lifetime of this page.
   useEffect(() => {
-    const busy = items.some(
-      (c) =>
-        c.aiStatus === "pending" ||
-        c.fetchStatus === "pending" ||
-        (c.url && !c.thumbnailUrl)
-    );
-    if (!busy) return;
-    const t = setInterval(() => {
-      load({ append: false }).catch(() => {});
-    }, 4000);
-    return () => clearInterval(t);
-  }, [items, load]);
+    let cancelled = false;
+    Promise.all([api.categories(), api.settings()])
+      .then(([cats, settings]) => {
+        if (cancelled) return;
+        setCategories(cats.items);
+        setSetup(settings.setup);
+      })
+      .catch((e) => {
+        if (!cancelled) toast.error(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Soft poll only while server work is actually pending. Schedule the next
+  // request after the previous one settles so slow responses never overlap.
+  const hasPendingWork = items.some(
+    (c) => c.aiStatus === "pending" || c.fetchStatus === "pending"
+  );
+  useEffect(() => {
+    if (!hasPendingWork) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      await load({ background: true });
+      if (!cancelled) timer = setTimeout(poll, 4000);
+    };
+
+    timer = setTimeout(poll, 4000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [hasPendingWork, load]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      listRequestIdRef.current += 1;
+    };
+  }, []);
 
   // Focus hairline capture (side nav / empty CTA / navigate state)
   useEffect(() => {
@@ -239,31 +321,37 @@ export default function HomePage() {
   }
 
   async function saveQuick() {
-    if (!quickText.trim()) return;
+    if (!quickText.trim() || quickSaveRef.current) return;
+    quickSaveRef.current = true;
     setSaving(true);
     try {
       const res = await api.createCard({ text: quickText.trim() });
+      if (!mountedRef.current) return;
       setQuickText("");
       toast.success(res.existing ? "已存在，已追加想法" : "已收藏");
       if (res.existing) navigate(`/cards/${res.card.id}`);
       else {
         await load({ append: false });
-        setTimeout(() => load({ append: false }).catch(() => {}), 2500);
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "保存失败");
     } finally {
-      setSaving(false);
+      quickSaveRef.current = false;
+      if (mountedRef.current) setSaving(false);
     }
   }
 
   async function drawOne() {
-    const { card } = await api.randomCard();
-    if (!card) {
-      toast.message("暂无可回顾的卡片");
-      return;
+    try {
+      const { card } = await api.randomCard();
+      if (!card) {
+        toast.message("暂无可回顾的卡片");
+        return;
+      }
+      navigate(`/cards/${card.id}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "抽取失败");
     }
-    navigate(`/cards/${card.id}`);
   }
 
   function toggleSelect(id: string, next: boolean) {
@@ -281,36 +369,42 @@ export default function HomePage() {
   }
 
   async function depositOne(id: string) {
+    if (cardActionsRef.current.has(id)) return;
+    cardActionsRef.current.add(id);
     try {
       await api.updateCard(id, { status: "organized" });
-      // Leave current list when filtering inbox; keep in 想法 with updated status
+      // Leave a status-scoped list, but keep global keyword search results.
       setItems((prev) =>
-        filter.status === "inbox"
+        !q && filter.status === "inbox"
           ? prev.filter((c) => c.id !== id)
           : prev.map((c) => (c.id === id ? { ...c, status: "organized" as const } : c))
       );
-      setTotal((t) => (filter.status === "inbox" ? Math.max(0, t - 1) : t));
+      setTotal((t) => (!q && filter.status === "inbox" ? Math.max(0, t - 1) : t));
       setInbox((n) => Math.max(0, n - 1));
       setSelected((s) => {
         const n = new Set(s);
         n.delete(id);
         return n;
       });
-      toast.success("已沉淀");
+      toast.success("已保留");
     } catch (e) {
       toast.error(String(e));
+    } finally {
+      cardActionsRef.current.delete(id);
     }
   }
 
   async function toInboxOne(id: string) {
+    if (cardActionsRef.current.has(id)) return;
+    cardActionsRef.current.add(id);
     try {
       await api.updateCard(id, { status: "inbox" });
       setItems((prev) =>
-        filter.status === "organized"
+        !q && filter.status === "organized"
           ? prev.filter((c) => c.id !== id)
           : prev.map((c) => (c.id === id ? { ...c, status: "inbox" as const } : c))
       );
-      setTotal((t) => (filter.status === "organized" ? Math.max(0, t - 1) : t));
+      setTotal((t) => (!q && filter.status === "organized" ? Math.max(0, t - 1) : t));
       setInbox((n) => n + 1);
       setSelected((s) => {
         const n = new Set(s);
@@ -320,15 +414,20 @@ export default function HomePage() {
       toast.success("已移回收件箱");
     } catch (e) {
       toast.error(String(e));
+    } finally {
+      cardActionsRef.current.delete(id);
     }
   }
 
   async function trashOne(id: string) {
+    if (cardActionsRef.current.has(id)) return;
+    cardActionsRef.current.add(id);
+    const wasInbox = items.some((card) => card.id === id && card.status === "inbox");
     try {
       await api.deleteCard(id);
       setItems((prev) => prev.filter((c) => c.id !== id));
       setTotal((t) => Math.max(0, t - 1));
-      setInbox((n) => Math.max(0, n - 1));
+      if (wasInbox) setInbox((n) => Math.max(0, n - 1));
       setSelected((s) => {
         const n = new Set(s);
         n.delete(id);
@@ -337,6 +436,8 @@ export default function HomePage() {
       toast.success("已移入回收站");
     } catch (e) {
       toast.error(String(e));
+    } finally {
+      cardActionsRef.current.delete(id);
     }
   }
 
@@ -351,26 +452,28 @@ export default function HomePage() {
         action === "retry"
           ? `已排队重试 ${r.ok} 条`
           : action === "organize"
-            ? `已沉淀 ${r.ok} 条`
+            ? `已保留 ${r.ok} 条`
             : `已移入回收站 ${r.ok} 条`
       );
       await load({ append: false });
     } catch (e) {
       toast.error(String(e));
     } finally {
-      setBulkBusy(false);
+      if (mountedRef.current) setBulkBusy(false);
     }
   }
 
   const canLoadMore = items.length < total;
   const selectionActive = selected.size > 0;
-  const pageTitle = filter.thoughtsOnly
-    ? "想法"
-    : filter.status === "organized"
-      ? "沉淀"
-      : "收件箱";
+  const pageTitle = q
+    ? "搜索"
+    : filter.thoughtsOnly
+      ? "想法"
+      : filter.status === "organized"
+        ? "已保留"
+        : "收件箱";
   const pageCount =
-    filter.thoughtsOnly || filter.status === "organized" ? total : inbox;
+    q || filter.thoughtsOnly || filter.status === "organized" ? total : inbox;
 
   return (
     <TooltipProvider>
@@ -617,7 +720,7 @@ export default function HomePage() {
                   onClick={() => runBulk("organize")}
                 >
                   <CheckCircle2 className="size-3.5" />
-                  沉淀
+                  保留
                 </Button>
                 <Button
                   size="sm"

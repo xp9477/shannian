@@ -27,6 +27,30 @@ export function ensureUrl(input: string): string {
   return `https://${t}`;
 }
 
+/** Validate and canonicalize a user-supplied bookmark URL without fetching it. */
+export function parseHttpUrl(input: string): string {
+  const trimmed = input.trim();
+  const explicitScheme = trimmed.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
+  if (explicitScheme && explicitScheme !== "http" && explicitScheme !== "https") {
+    throw new Error("INVALID_URL");
+  }
+  let url: URL;
+  try {
+    url = new URL(ensureUrl(trimmed));
+  } catch {
+    throw new Error("INVALID_URL");
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    !url.hostname ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error("INVALID_URL");
+  }
+  return url.toString();
+}
+
 export function normalizeUrl(raw: string): string {
   let u: URL;
   try {
@@ -47,16 +71,43 @@ export function normalizeUrl(raw: string): string {
   return u.toString();
 }
 
+/** Match a hostname against a registrable domain without accepting lookalike suffixes. */
+export function hostnameMatches(hostname: string, domain: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/\.$/, "");
+  const expected = domain.trim().toLowerCase().replace(/\.$/, "");
+  return host === expected || host.endsWith(`.${expected}`);
+}
+
 export function detectPlatform(urlStr: string): Platform {
   try {
     const u = new URL(ensureUrl(urlStr));
-    const host = u.hostname.toLowerCase().replace(/^www\./, "");
-    if (host.includes("xiaohongshu.com") || host === "xhslink.com") return "xiaohongshu";
-    if (host.includes("douyin.com") || host.includes("iesdouyin.com")) return "douyin";
-    if (host.includes("bilibili.com") || host.includes("b23.tv")) return "bilibili";
-    if (host.includes("youtube.com") || host === "youtu.be") return "youtube";
-    if (host === "x.com" || host === "twitter.com" || host === "t.co") return "x";
-    if (host.includes("t.me") || host.includes("telegram.")) return "telegram";
+    const host = u.hostname;
+    if (hostnameMatches(host, "xiaohongshu.com") || hostnameMatches(host, "xhslink.com")) {
+      return "xiaohongshu";
+    }
+    if (hostnameMatches(host, "douyin.com") || hostnameMatches(host, "iesdouyin.com")) {
+      return "douyin";
+    }
+    if (hostnameMatches(host, "bilibili.com") || hostnameMatches(host, "b23.tv")) {
+      return "bilibili";
+    }
+    if (hostnameMatches(host, "youtube.com") || hostnameMatches(host, "youtu.be")) {
+      return "youtube";
+    }
+    if (
+      hostnameMatches(host, "x.com") ||
+      hostnameMatches(host, "twitter.com") ||
+      hostnameMatches(host, "t.co")
+    ) {
+      return "x";
+    }
+    if (
+      hostnameMatches(host, "t.me") ||
+      hostnameMatches(host, "telegram.org") ||
+      hostnameMatches(host, "telegram.me")
+    ) {
+      return "telegram";
+    }
     return "web";
   } catch {
     return "unknown";

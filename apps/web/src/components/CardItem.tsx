@@ -92,7 +92,7 @@ export function CardItem({
   selectionActive?: boolean;
   onSelect?: (id: string, next: boolean) => void;
   onClick: () => void;
-  /** 沉淀 — primary for inbox */
+  /** 保留 — primary for inbox */
   onDeposit?: (id: string) => void;
   /** 移回收件箱 — weak, hover-only on desktop (P2) */
   onToInbox?: (id: string) => void;
@@ -161,6 +161,7 @@ export function CardItem({
               <img
                 src={card.thumbnailUrl}
                 alt=""
+                referrerPolicy="no-referrer"
                 className="absolute inset-0 h-full w-full object-cover transition-transform duration-200 ease-out group-hover:scale-[1.03]"
               />
             ) : (
@@ -219,7 +220,7 @@ export function CardItem({
                 }}
               >
                 <Archive className="size-3.5" aria-hidden />
-                沉淀
+                保留
               </Button>
             )}
             {isDeposited && onToInbox && (
@@ -291,7 +292,12 @@ export function CardItem({
       >
         <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-[10px] bg-[var(--color-muted)] ring-1 ring-black/[0.04] dark:ring-white/[0.06]">
           {card.thumbnailUrl ? (
-            <img src={card.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+            <img
+              src={card.thumbnailUrl}
+              alt=""
+              referrerPolicy="no-referrer"
+              className="h-full w-full object-cover"
+            />
           ) : (
             <ThumbPlaceholder hasUrl={Boolean(card.url)} />
           )}
@@ -347,7 +353,7 @@ export function CardItem({
               className="min-h-9 rounded-full px-3 text-xs font-medium"
               onClick={() => onDeposit(card.id)}
             >
-              沉淀
+              保留
             </Button>
           )}
           {isDeposited && onToInbox && (

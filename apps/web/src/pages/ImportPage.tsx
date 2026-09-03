@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { ImportJob, PlatformImportPublic, XCredentialsPublic } from "@shannian/shared";
 import { toast } from "sonner";
@@ -19,37 +19,54 @@ export default function ImportPage() {
   const [ct0, setCt0] = useState("");
   const [job, setJob] = useState<ImportJob | null>(null);
   const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(true);
 
   const load = useCallback(async () => {
-    const [plats, x, count, cats] = await Promise.all([
+    const [plats, x, count, cats, currentJob] = await Promise.all([
       api.importPlatforms(),
       api.xCredentials(),
       api.inboxCount(),
       api.categories(),
+      api.xImportJob(),
     ]);
+    if (!mountedRef.current) return;
     setPlatforms(plats.items);
     setRiskNote(plats.riskNote || x.riskNote);
     setCreds(x.credentials);
     setInbox(count.count);
     setCategories(cats.items);
-    const j = await api.xImportJob();
-    setJob(j.job);
+    setJob(currentJob.job);
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     load().catch((e) => toast.error(String(e)));
+    return () => {
+      mountedRef.current = false;
+    };
   }, [load]);
 
-  // Poll while job running
+  // Poll while the job is running, scheduling only after the previous request
+  // settles so a slow NAS/network cannot create overlapping requests.
   useEffect(() => {
     if (job?.status !== "running") return;
-    const t = setInterval(() => {
-      api
-        .xImportJob()
-        .then((r) => setJob(r.job))
-        .catch(() => {});
-    }, 1500);
-    return () => clearInterval(t);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const result = await api.xImportJob();
+        if (!cancelled && mountedRef.current) setJob(result.job);
+      } catch {
+        // Keep polling transient failures while the page remains open.
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, 1500);
+      }
+    };
+    timer = setTimeout(poll, 1500);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [job?.status]);
 
   async function saveCreds() {
@@ -123,6 +140,7 @@ export default function ImportPage() {
 
   const xPlatform = platforms.find((p) => p.id === "x");
   const running = job?.status === "running";
+  const connected = Boolean(creds?.hasAuthToken && creds?.hasCt0);
 
   return (
     <AppShell
@@ -173,6 +191,7 @@ export default function ImportPage() {
             <Input
               type="password"
               autoComplete="off"
+              spellCheck={false}
               placeholder={
                 creds?.authTokenHint
                   ? `auth_token（已配置 ${creds.authTokenHint}，留空不改）`
@@ -184,6 +203,7 @@ export default function ImportPage() {
             <Input
               type="password"
               autoComplete="off"
+              spellCheck={false}
               placeholder={
                 creds?.ct0Hint ? `ct0（已配置 ${creds.ct0Hint}，留空不改）` : "ct0（CSRF）"
               }
@@ -207,7 +227,7 @@ export default function ImportPage() {
             <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
-                disabled={busy || running || !creds?.hasAuthToken}
+                disabled={busy || running || !connected}
                 onClick={() => startImport(false)}
               >
                 {running ? (
@@ -222,7 +242,7 @@ export default function ImportPage() {
               <Button
                 size="sm"
                 variant="outline"
-                disabled={busy || running || !creds?.hasAuthToken}
+                disabled={busy || running || !connected}
                 onClick={() => {
                   if (!confirm("强制全量将重新扫描全部书签（已存在的会跳过/认领）。继续？")) return;
                   startImport(true);

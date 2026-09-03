@@ -1,6 +1,10 @@
 import type { SummaryBasis } from "@shannian/shared";
 import { getAiConfig } from "../lib/settings.js";
-import { outboundFetch } from "../lib/http.js";
+import {
+  outboundFetch,
+  readResponseJson,
+  readResponseText,
+} from "../lib/http.js";
 import { clampTitle, isShellTitle } from "./title.js";
 
 export interface AiSuggestion {
@@ -82,13 +86,13 @@ export async function suggestForCard(input: {
   });
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await readResponseText(res, 16 * 1024).catch(() => "");
     throw new Error(`AI_HTTP_${res.status}: ${text.slice(0, 200)}`);
   }
 
-  const data = (await res.json()) as {
+  const data = await readResponseJson<{
     choices?: { message?: { content?: string } }[];
-  };
+  }>(res, 1024 * 1024);
   const content = data.choices?.[0]?.message?.content || "{}";
   let parsed: {
     category?: string | null;
@@ -137,8 +141,10 @@ export async function testAiConnection(): Promise<{ ok: boolean; message: string
       signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
       return { ok: false, message: `HTTP ${res.status}` };
     }
+    await res.body?.cancel().catch(() => undefined);
     return { ok: true, message: "连接成功" };
   } catch (e) {
     return { ok: false, message: String(e) };
